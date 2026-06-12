@@ -60,16 +60,20 @@ Prerequisites:
   cp .env.sample .env   # then fill in the NEO4J_* values
   ```
 
-## Step 1: Create the Silver tables
+## Step 1: Run the setup notebook in Databricks
 
 The Virtual Graph reads the Finance Genie Silver tables, so they must exist before you
 build it. Run [`notebooks/01_setup_lakehouse.ipynb`](notebooks/01_setup_lakehouse.ipynb)
-in your Databricks workspace. It downloads the Finance Genie dataset from the public
-[graph-on-databricks](https://github.com/neo4j-partners/graph-on-databricks) repo, stages
-the CSVs into a Unity Catalog Volume, and builds the five base tables (`accounts`,
-`merchants`, `transactions`, `account_links`, `account_labels`) with their column
-comments and foreign keys. Set the catalog / schema / volume in the notebook's
-configuration cell; the defaults match the Finance Genie pipeline.
+in your Databricks workspace to set up the data for the Virtual Graph. The notebook:
+
+- Downloads the Finance Genie dataset from the public
+  [graph-on-databricks](https://github.com/neo4j-partners/graph-on-databricks) repo.
+- Stages the CSVs into a Unity Catalog Volume.
+- Builds the five base tables (`accounts`, `merchants`, `transactions`, `account_links`,
+  `account_labels`) with their column comments and foreign keys.
+
+Set the catalog / schema / volume in the notebook's configuration cell; the defaults
+match the Finance Genie pipeline.
 
 ## Step 2: Build the Virtual Graph
 
@@ -237,11 +241,13 @@ Demonstrates the two GDS failure modes on the Virtual Graph, both caught and pri
 
 The fast-gds projection carries only labels and the relationship type; it never projects
 `amount` or `transfer_timestamp` as graph properties. This demo isolates what happens when
-you add properties: a GDS in-memory graph only accepts **numeric** property types, so it
-sweeps a series of projections on a thin window where the timeout stays out of the
-picture, adding one node or relationship property at a time, and reports which ones project
-and which the server rejects. It first introspects the live schema and prints each property's type, then
-runs:
+you add properties:
+
+- A GDS in-memory graph only accepts **numeric** property types.
+- The demo sweeps projections on a thin window (timeout stays out of the picture), adding
+  one node or relationship property at a time, and reports which project and which the
+  server rejects.
+- It first introspects the live schema and prints each property's type, then runs:
 
 | Scenario | Projection adds | Result |
 |---|---|---|
@@ -252,20 +258,25 @@ runs:
 | E_node_numeric | a numeric node property on both endpoints | projects |
 | F_node_nonnumeric | a string node property on both endpoints | rejected fast |
 
-Each rejection comes back in under a second, before the session provisions, as
-`IllegalArgumentException: The property ... contained a value of type DateTime/String,
-which is not supported`. This is standard GDS typing, not a Virtual Graph defect: project
-only numeric columns, and cast or drop temporal and string ones. See the modeling note in
-[`gds-guide.md`](gds-guide.md). Use `--count-only` to introspect the schema without
-provisioning, and `--since-hours` / `--since-days` to size the window.
+- Each rejection comes back in under a second, before the session provisions, as
+  `IllegalArgumentException: The property ... contained a value of type DateTime/String,
+  which is not supported`.
+- This is standard GDS typing, not a Virtual Graph defect: project only numeric columns,
+  and cast or drop temporal and string ones. See the modeling note in
+  [`gds-guide.md`](gds-guide.md).
+- `--count-only` introspects the schema without provisioning; `--since-hours` /
+  `--since-days` size the window.
 
 ### `timezone` demo
 
-The single largest slow path the verification found: when a result carries TIMESTAMP
-values, the engine makes one `SELECT current_timezone()` round trip to the warehouse for
-every value it materializes into a Cypher datetime, run serially with no caching. DATE
-values and plain scalars cost nothing. The demo runs five discriminating queries, each
-capped at `LIMIT 25`, so the per-value cost is visible:
+The single largest slow path the verification found:
+
+- When a result carries TIMESTAMP values, the engine makes one `SELECT current_timezone()`
+  round trip to the warehouse for every value it materializes into a Cypher datetime, run
+  serially with no caching.
+- DATE values and plain scalars cost nothing.
+- The demo runs five discriminating queries, each capped at `LIMIT 25`, so the per-value
+  cost is visible:
 
 | # | Query | What it carries | Predicted calls |
 |---|---|---|---|
@@ -275,28 +286,32 @@ capped at `LIMIT 25`, so the per-value cost is visible:
 | D | `RETURN a` (an `Account` node) | only a DATE | 0 |
 | E | rerun A twice back to back | a TIMESTAMP, no session cache | 25 + 25 |
 
-Two signals are reported. Wall-clock is always available: the TIMESTAMP-bearing runs (A,
-C, E) spend seconds on 25 rows while the scalar / DATE runs (B, D) are sub-second. When
-the Databricks SDK is installed (`uv sync --extra history`) and a warehouse is configured
-(`DATABRICKS_WAREHOUSE_ID`, optionally `DATABRICKS_CONFIG_PROFILE`, in `.env`), the demo
-also pulls warehouse query history and counts the actual `current_timezone()` statements
-per run, which is the direct proof. Query history lags about 11 minutes, so the demo polls
-it every 3 minutes (up to 10 times, ~30 minutes) until all the expected statements have
-ingested, then prints the per-run counts. `--no-history` reports wall-clock only;
-`--history-wait S` sets the initial wait before the first poll. See
-[`findings-summary.md`](findings-summary.md) and
+Two signals are reported:
+
+- **Wall-clock** is always available: the TIMESTAMP-bearing runs (A, C, E) spend seconds
+  on 25 rows while the scalar / DATE runs (B, D) are sub-second.
+- **Direct call count** (the proof) needs the Databricks SDK (`uv sync --extra history`)
+  and a configured warehouse (`DATABRICKS_WAREHOUSE_ID`, optionally
+  `DATABRICKS_CONFIG_PROFILE`, in `.env`). The demo pulls warehouse query history and
+  counts the actual `current_timezone()` statements per run. History lags about 11
+  minutes, so it polls every 3 minutes (up to 10 times, ~30 minutes) until all expected
+  statements ingest, then prints the per-run counts.
+
+Flags: `--no-history` reports wall-clock only; `--history-wait S` sets the initial wait
+before the first poll. See [`findings-summary.md`](findings-summary.md) and
 [`verify-best.md`](test-results/verify-best.md) Phases 5 and 9.
 
 ### `100m` demo
 
-The "zero spill from 100K to 100M rows" finding, reproduced on the SQL side. Unlike the
-other demos, this one talks SQL straight to the backing Databricks warehouse via the
-Databricks SDK (not Cypher over Bolt), because the finding is the SQL-side spike: it runs
-the C1/C2/C3 aggregation SQL the Virtual Graph pushes down to, directly against
-`account_links_large`, then reads `spill_to_disk_bytes` from warehouse query history to
-show the warehouse never spills. The SDK ships as the `history` extra
-(`uv sync --extra history`), and unlike the `timezone` demo it is required here since this
-demo has no Bolt fallback.
+The "zero spill from 100K to 100M rows" finding, reproduced on the SQL side:
+
+- Unlike the other demos, this one talks SQL straight to the backing Databricks warehouse
+  via the Databricks SDK (not Cypher over Bolt), because the finding is the SQL-side spike.
+- It runs the C1/C2/C3 aggregation SQL the Virtual Graph pushes down to, directly against
+  `account_links_large`, then reads `spill_to_disk_bytes` from warehouse query history to
+  show the warehouse never spills.
+- The SDK ships as the `history` extra (`uv sync --extra history`), and unlike the
+  `timezone` demo it is required here since this demo has no Bolt fallback.
 
 | # | Query | What it carries |
 |---|---|---|
@@ -304,17 +319,25 @@ demo has no Bolt fallback.
 | C2 | windowed group-by (recent transfers only) | filtered scan + hash aggregate |
 | C3 | high-cardinality pair group-by, top 100 | scan + two-key aggregate + order/limit |
 
-Each C-query is wrapped in an outer `count(*)` so the full scan-and-aggregate cost is
-paid without shipping result rows. By default the demo queries the existing table
-read-only, then waits out the warehouse query-history lag (11-25 min, polling on an
-interval with a countdown) until every statement finalizes, and prints the confirmatory
-metrics with the zero-spill headline. `--build` first rebuilds `account_links_large` at
-each ramp size (100K, 250K, 500K, 1M, 10M, 50M, 100M) with a destructive
-`CREATE OR REPLACE`; `--sizes` picks specific ramp sizes; `--skip-history` runs the
-C-queries but skips the history wait (spill left unconfirmed). Connection details
-(profile, catalog, schema) come from the project `.env`; the warehouse defaults to the
-backing Virtual Graph warehouse, overridable with `--warehouse`. See
-[`findings-summary.md`](findings-summary.md) and
+Notes:
+
+- Each C-query is wrapped in an outer `count(*)` so the full scan-and-aggregate cost is
+  paid without shipping result rows.
+- By default the demo queries the existing table read-only, then waits out the warehouse
+  query-history lag (11-25 min, polling with a countdown) until every statement finalizes,
+  and prints the confirmatory metrics with the zero-spill headline.
+- Connection details (profile, catalog, schema) come from the project `.env`; the
+  warehouse defaults to the backing Virtual Graph warehouse.
+
+Flags:
+
+- `--build` first rebuilds `account_links_large` at each ramp size (100K, 250K, 500K, 1M,
+  10M, 50M, 100M) with a destructive `CREATE OR REPLACE`.
+- `--sizes` picks specific ramp sizes.
+- `--skip-history` runs the C-queries but skips the history wait (spill left unconfirmed).
+- `--warehouse` overrides the warehouse.
+
+See [`findings-summary.md`](findings-summary.md) and
 [`perf-tests-results-v2.md`](test-results/perf-tests-results-v2.md) Spike 1.
 
 ### Support scripts
