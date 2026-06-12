@@ -8,6 +8,11 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
+[project.optional-dependencies]
+# Used only by `--demo timezone` to pull warehouse query history and count the
+# current_timezone() round trips. The core demos need only neo4j + python-dotenv.
+history = ["databricks-sdk>=0.30"]
+
 [project.scripts]
 vg-demo = "cli:main"
 vg-probe = "probe:main"

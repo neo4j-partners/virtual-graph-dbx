@@ -56,7 +56,7 @@ PageRank cost lives entirely in the Neo4j GDS Session, not the warehouse.
 
 ---
 
-## The timezone round-trip
+## TIMESTAMP results trigger a per-row warehouse round-trip
 
 The single largest slow path found. When a result carries TIMESTAMP values, the engine makes a
 separate round trip to the warehouse for every one of them. A query that returns N rows with a
@@ -75,6 +75,9 @@ timestamp fires N `SELECT current_timezone()` statements, one per row, run seria
 - **This is what dominates wall-clock, not warehouse compute.** The 3,331-row node-grouped pull
   finished in 738 ms on the warehouse, then spent ~10 minutes on the 3,331 serial timezone
   calls. `[verify-best.md -> Phase 5]`
+
+See [Timezone Resolution Possibilities](#timezone-resolution-possibilities) for the approaches
+that will not fix this and the candidate fixes that still need testing.
 
 ---
 
@@ -130,3 +133,58 @@ Where the aggregation workload's cost actually grows.
 - **Aggregation wall-clock tracks rows returned.** The pair query rose from ~1 s at 3,303
   rows to ~27 s at 222,966 rows, ~0.12 ms per row above a ~1 s floor, all of it Aura-to-client
   data movement. Narrowing the window is the lever. `[perf-tests-results.md -> Test set A]`
+
+---
+
+## Timezone Resolution Possibilities
+
+### Why zone changes will not fix it
+
+The round trip is driven by how the engine renders a value, not by what zone the data
+carries. A Databricks `TIMESTAMP` is a timezone-aware instant, and Neo4j's Cypher
+`datetime` is a zoned value, so each time the engine turns a warehouse instant into a
+Cypher datetime it resolves the session timezone with one `SELECT current_timezone()`
+call. The cost is the number of serial, uncached calls, one per value, and that count
+does not change with the zone the value holds. The following three approaches therefore
+will not fix it:
+
+- **Convert the timestamps to UTC.** The engine still issues one `current_timezone()`
+  call per value. It would receive `UTC` as the answer each time and pay the same per-row
+  cost.
+- **Set the warehouse session timezone to UTC.** Same outcome. The number of calls is
+  fixed by the number of materialized timestamps, not by the timezone the call returns.
+- **Attach an explicit timezone to the timestamp column.** Giving the value a zone does
+  not stop the engine from resolving the session zone per value, so the round trips
+  remain.
+
+### Candidate fixes that still need testing
+
+Two approaches could remove the round trip. Both need to be measured before they are
+relied on; the `--demo timezone` harness counts `current_timezone()` calls per query and
+can confirm each.
+
+- **Do not materialize a Cypher datetime in bulk returns.** Project a scalar instead of
+  returning a node, relationship, or column that carries a TIMESTAMP, for example
+  `t.transfer_timestamp.epochMillis` as a number or an ISO-8601 string. No Cypher datetime
+  is built, so there is no zone to resolve and no round trip. Phase 9 already showed the
+  direction: returning non-temporal scalars fired zero calls.
+  `[verify-best.md -> Phase 9, run B]`
+- **Store or expose the column as `TIMESTAMP_NTZ`.** A no-zone timestamp has no session
+  zone to resolve. If the engine maps `TIMESTAMP_NTZ` to a Cypher `LocalDateTime` rather
+  than a zoned `datetime`, the round trip never fires, the same reason `DATE` values are
+  free. Whether the engine maps NTZ this way, or supports it at all, is untested, and NTZ
+  drops the global instant anchor, which matters for any cross-zone or external-clock
+  correlation.
+
+#### Does epochMillis lose precision?
+
+No loss that affects fraud correlation.
+
+- **It is the exact absolute instant.** `epochMillis` is milliseconds since the Unix epoch
+  in UTC, comparable directly across rows and against external timelines.
+- **It keeps the global anchor.** Unlike `TIMESTAMP_NTZ`, it stays tied to a UTC instant,
+  so it is the safer fix when exact correlation matters.
+- **The only caveat is millisecond rounding.** A Databricks `TIMESTAMP` holds microseconds;
+  `epochMillis` truncates to the millisecond. That is exact enough for transaction-time
+  correlation. If microseconds are ever required, return an ISO-8601 string or an
+  epoch-microsecond value instead.

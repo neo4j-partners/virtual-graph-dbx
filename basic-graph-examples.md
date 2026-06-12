@@ -3,7 +3,7 @@
 Warm-up queries for the Finance Genie Virtual Graph: simple counts and small
 relationship traversals that show the value of the graph without any fraud
 logic. They are the queries to open a demo with, before the structural fraud
-signals in [`finding-fraud.md`](finding-fraud.md).
+signals in [`finding-fraud.md`](docs/finding-fraud.md).
 
 Every query here was verified live against the Aura Virtual Graph backed by the
 Databricks Silver tables. Each one runs through the `basic` demo:

@@ -458,4 +458,67 @@ RETURN a, b, c
 LIMIT 25
 """,
     ),
+    # ------------------------------------------------------------------- #
+    # Pushdown demonstrations (verified in verify-best.md, Phases 6-7).
+    # ------------------------------------------------------------------- #
+    BasicQuery(
+        number=12,
+        title="Count accounts and merchants in one statement (UNION ALL)",
+        kind="table",
+        note=(
+            "Counting two labels in one chained statement fails with 42NG0 (see B1); "
+            "UNION ALL is the one-statement workaround. It runs as one Cypher statement "
+            "but two pushed SQL statements, one count per branch, concatenated engine-side."
+        ),
+        cypher="""
+MATCH (a:Account)  RETURN 'accounts'  AS label, count(a) AS n
+UNION ALL
+MATCH (m:Merchant) RETURN 'merchants' AS label, count(m) AS n
+""",
+    ),
+    BasicQuery(
+        number=13,
+        title="Any 25 account-merchant edges (unanchored single-hop, LIMIT)",
+        kind="graph",
+        note=(
+            "Unanchored, so there is no starting filter; LIMIT 25 still pushes into the "
+            "SQL as LIMIT ?, so exactly 25 rows come back (~6s, the warehouse still scans "
+            "to find them)."
+        ),
+        cypher="""
+MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
+RETURN a, t, m
+LIMIT 25
+""",
+    ),
+    BasicQuery(
+        number=14,
+        title="Any 25 two-hop transfer chains (unanchored, LIMIT)",
+        kind="graph",
+        note=(
+            "Unanchored two-hop over TRANSFERRED_TO; the limit still pushes down to 25 rows "
+            "(~1.5s). The pushed SQL also carries Cypher's relationship-uniqueness rule."
+        ),
+        cypher="""
+MATCH (a:Account)-[:TRANSFERRED_TO]->(b:Account)-[:TRANSFERRED_TO]->(c:Account)
+RETURN a, b, c
+LIMIT 25
+""",
+    ),
+    BasicQuery(
+        number=15,
+        title="Any 25 four-hop transfer chains (unanchored, LIMIT)",
+        kind="graph",
+        note=(
+            "Depth escalation: LIMIT 25 bounds the output, not the join work behind it. "
+            "Exactly 25 rows come back, but ~14s of it is warehouse join time. An anchor "
+            "is what makes a deep traversal cheap."
+        ),
+        cypher="""
+MATCH (a:Account)-[:TRANSFERRED_TO]->(b:Account)-[:TRANSFERRED_TO]->(c:Account)
+      -[:TRANSFERRED_TO]->(d:Account)-[:TRANSFERRED_TO]->(e:Account)
+RETURN a, b, c, d, e
+LIMIT 25
+""",
+    ),
 ]

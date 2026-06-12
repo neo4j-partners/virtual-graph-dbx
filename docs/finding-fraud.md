@@ -312,7 +312,7 @@ RETURN a, t, b
 
 For more warm-up and visualization queries (ego networks around merchants, two accounts
 linked through a shared merchant, transfer chains), see
-[`basic-graph-examples.md`](basic-graph-examples.md). The same anchoring
+[`basic-graph-examples.md`](../basic-graph-examples.md). The same anchoring
 rule applies to all of them.
 
 ## How it all ties together

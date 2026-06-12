@@ -145,7 +145,7 @@ None of those sit on the columns the demo queries filter by. The fraud queries a
 session window all filter on timestamps, amounts, and account dates, not on the ID
 columns. The Aura Import guidance is to add a range index to any property you regularly
 filter by range. The five additions below map to the queries in
-[`finding-fraud.md`](finding-fraud.md) and the GDS path in [`gds-guide.md`](gds-guide.md),
+[`finding-fraud.md`](docs/finding-fraud.md) and the GDS path in [`gds-guide.md`](gds-guide.md),
 ordered by how many queries each one serves:
 
 | Index | Type | Backs |

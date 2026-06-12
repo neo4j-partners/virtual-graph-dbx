@@ -6,7 +6,7 @@ warehouse, so the rules here are about helping that translation push work down t
 Databricks instead of dragging rows back to the graph engine.
 
 The working fraud queries this guide draws on are the demo set in
-[`finding-fraud.md`](finding-fraud.md); the warm-up and visualization queries are in
+[`finding-fraud.md`](docs/finding-fraud.md); the warm-up and visualization queries are in
 [`basic-graph-examples.md`](basic-graph-examples.md). This document is the reference
 for *why* those queries are shaped the way they are, and what to do when a standard
 Cypher query will not run.
@@ -235,7 +235,7 @@ account or merchant. Either way, keep the row count small: a query that returns 
 relationships carrying a `TIMESTAMP` pays one warehouse round trip per row (see
 [Pattern 7](#pattern-7-keep-timestamps-out-of-bulk-results)), which is harmless at 25 rows
 and fatal in bulk. The visualization queries in
-[`finding-fraud.md`](finding-fraud.md) and [`basic-graph-examples.md`](basic-graph-examples.md)
+[`finding-fraud.md`](docs/finding-fraud.md) and [`basic-graph-examples.md`](basic-graph-examples.md)
 all follow this rule.
 
 ### Pattern 6: keep result sets small

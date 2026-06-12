@@ -1,10 +1,12 @@
 .env
 .env.local
+.env.*
+!.env.sample
 .venv/
 __pycache__/
 .ruff_cache/
 .pytest_cache/
 .DS_Store
 .idea/
-test-results/
+.claude/settings.local.json
 uv.lock
