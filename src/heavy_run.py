@@ -14,7 +14,7 @@ import argparse
 import threading
 import time
 
-from neo4j import GraphDatabase
+from neo4j import Driver, GraphDatabase
 from neo4j.exceptions import Neo4jError
 
 from connection import load_connection
@@ -37,7 +37,7 @@ def by_number(number: int) -> Query:
     return next(q for q in QUERIES if q.number == number)
 
 
-def run_capped(driver, query: Query, params: dict[str, object]) -> str:
+def run_capped(driver: Driver, query: Query, params: dict[str, object]) -> str:
     """Run one query in a worker thread, capped at CAP seconds (no server cancel).
 
     Uses an explicit auto-commit ``session.run`` (no managed-transaction retry), so a
@@ -73,7 +73,7 @@ def run_capped(driver, query: Query, params: dict[str, object]) -> str:
     return "UNKNOWN (worker produced no result)"
 
 
-def health(driver) -> tuple[bool, str]:
+def health(driver: Driver) -> tuple[bool, str]:
     """Return (ok, detail) from a RETURN 1 probe, capped at HEALTH_CAP seconds."""
     box: dict[str, object] = {}
 

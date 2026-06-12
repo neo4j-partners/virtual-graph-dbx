@@ -15,7 +15,7 @@ from neo4j import Driver
 from neo4j._sync.io._bolt_socket import BoltSocket
 from neo4j.exceptions import DriverError, Neo4jError
 
-from helpers import _driver_error
+from helpers import driver_error
 
 DROP_GRAPH = """
 CALL gds.graph.drop($graph, false)
@@ -73,7 +73,7 @@ def run_statement(driver: Driver, label: str, cypher: str,
         return None
     except DriverError as exc:
         elapsed = time.perf_counter() - t0
-        print(f"  FAILED after {elapsed:.1f}s: {_driver_error(exc)}")
+        print(f"  FAILED after {elapsed:.1f}s: {driver_error(exc)}")
         return None
     elapsed = time.perf_counter() - t0
     print(f"  OK {elapsed:.1f}s, {len(rows)} row(s)")

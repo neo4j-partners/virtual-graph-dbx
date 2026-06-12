@@ -236,13 +236,13 @@ RETURN acct AS account_id, merchant_count
             "forward-after-receive ordering and the same-value (5%) test are kept."
         ),
         cypher="""
-MATCH (a:Account)-[in:TRANSFERRED_TO]->(mule:Account)-[out:TRANSFERRED_TO]->(b:Account)
-WHERE out.transfer_timestamp >= in.transfer_timestamp
-  AND abs(out.amount - in.amount) <= 0.05 * in.amount
+MATCH (a:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)-[t_out:TRANSFERRED_TO]->(b:Account)
+WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
+  AND abs(t_out.amount - t_in.amount) <= 0.05 * t_in.amount
   AND a <> b
 RETURN mule.account_id            AS account_id,
        count(*)                   AS passthroughs,
-       round(sum(in.amount), 2)   AS volume
+       round(sum(t_in.amount), 2) AS volume
 ORDER BY passthroughs DESC
 """,
     ),
@@ -277,13 +277,13 @@ ORDER BY account_count DESC
             "rapid_pairs>=50 filtered client-side."
         ),
         cypher="""
-MATCH (src:Account)-[in:TRANSFERRED_TO]->(mule:Account)-[out:TRANSFERRED_TO]->(dst:Account)
-WHERE out.transfer_timestamp >= in.transfer_timestamp
+MATCH (src:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)-[t_out:TRANSFERRED_TO]->(dst:Account)
+WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
   AND src <> dst
 WITH mule,
      count(*) AS rapid_pairs,
-     round(avg(out.transfer_timestamp.epochMillis
-               - in.transfer_timestamp.epochMillis) / 3600000.0, 1) AS avg_turnaround_hours
+     round(avg(t_out.transfer_timestamp.epochMillis
+               - t_in.transfer_timestamp.epochMillis) / 3600000.0, 1) AS avg_turnaround_hours
 RETURN mule.account_id AS account_id, rapid_pairs, avg_turnaround_hours
 ORDER BY rapid_pairs DESC
 """,

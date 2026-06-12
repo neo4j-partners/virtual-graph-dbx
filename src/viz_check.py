@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import time
 
-from neo4j import GraphDatabase
+from neo4j import Driver, GraphDatabase, Record
 
 from connection import load_connection
 
 CUTOFF = "2024-03-23T23:58:00Z"  # dataset max transfer_timestamp minus 7 days
 
 
-def timed(driver, label: str, cypher: str, **params: object) -> list:
+def timed(driver: Driver, label: str, cypher: str, **params: object) -> list[Record]:
     """Run one query, print its wall-clock time and row count, return the records."""
     t0 = time.perf_counter()
     recs, _, _ = driver.execute_query(cypher, **params)
@@ -40,11 +40,12 @@ def main() -> None:
         recs = timed(
             driver,
             "find collection account",
-            'MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account) '
-            f'WHERE t.transfer_timestamp >= datetime("{CUTOFF}") '
+            "MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account) "
+            "WHERE t.transfer_timestamp >= datetime($since) "
             "WITH dst.account_id AS recipient, src.account_id AS sender, count(t) AS legs "
             "WITH recipient, count(*) AS senders "
             "RETURN recipient, senders ORDER BY senders DESC LIMIT 5",
+            since=CUTOFF,
         )
         coll_id = recs[0]["recipient"]
         print(f"    -> account {coll_id} with {recs[0]['senders']} distinct senders")
@@ -53,11 +54,12 @@ def main() -> None:
         recs = timed(
             driver,
             "find spray account",
-            'MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account) '
-            f'WHERE t.transfer_timestamp >= datetime("{CUTOFF}") '
+            "MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account) "
+            "WHERE t.transfer_timestamp >= datetime($since) "
             "WITH src.account_id AS sender, dst.account_id AS recipient, count(t) AS legs "
             "WITH sender, count(*) AS recipients "
             "RETURN sender, recipients ORDER BY recipients DESC LIMIT 5",
+            since=CUTOFF,
         )
         spray_id = recs[0]["sender"]
         print(f"    -> account {spray_id} with {recs[0]['recipients']} distinct recipients")

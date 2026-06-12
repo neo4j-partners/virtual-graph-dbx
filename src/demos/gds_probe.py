@@ -18,7 +18,7 @@ import argparse
 import datetime as dt
 from dataclasses import dataclass
 
-from neo4j import GraphDatabase, Driver
+from neo4j import Driver, GraphDatabase
 from neo4j.time import Date, DateTime, Time, Duration
 
 from connection import load_connection
@@ -74,7 +74,7 @@ BASE_CONFIG = (
 )
 
 
-@dataclass
+@dataclass(frozen=True)
 class Scenario:
     """One projection variant in the sweep."""
 

@@ -17,7 +17,7 @@ from neo4j import Driver
 from neo4j.exceptions import DriverError, Neo4jError
 from neo4j.time import Date, DateTime
 
-from helpers import _driver_error, data_max_dates, print_table, run_cypher, since_param
+from helpers import data_max_dates, driver_error, print_table, run_cypher, since_param
 from queries import QUERIES, Query, Row
 
 
@@ -68,7 +68,7 @@ def run_query(driver: Driver, query: Query, max_rows: int, timeout: float,
         print(f"  ERROR{note} after {time.perf_counter() - t0:.1f}s: {exc.code}\n  {exc.message}")
         return
     except DriverError as exc:
-        print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {_driver_error(exc)}")
+        print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {driver_error(exc)}")
         return
     elapsed = time.perf_counter() - t0
 

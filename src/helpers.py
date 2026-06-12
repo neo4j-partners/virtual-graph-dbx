@@ -47,13 +47,12 @@ def since_param(query: Query, max_transfer: DateTime, max_opened: Date) -> dt.da
 def run_cypher(driver: Driver, cypher: str, params: dict[str, object],
                timeout: float) -> list[Row]:
     """Run one statement in an explicit transaction (no managed-transaction retry)."""
-    with driver.session() as session:
-        tx = session.begin_transaction(timeout=timeout)
-        try:
-            result = tx.run(cypher, **params)
-            return [record.data() for record in result]
-        finally:
-            tx.close()
+    with (
+        driver.session() as session,
+        session.begin_transaction(timeout=timeout) as tx,
+    ):
+        result = tx.run(cypher, **params)
+        return [record.data() for record in result]
 
 
 def print_table(rows: list[Row], max_rows: int, total_matched: int) -> None:
@@ -83,7 +82,7 @@ def _fmt(value: object) -> str:
     return str(value)
 
 
-def _driver_error(exc: DriverError) -> str:
+def driver_error(exc: DriverError) -> str:
     """One-line description of a client-side driver failure (timeout, lost connection).
 
     These are not server ``Neo4jError`` codes; the useful detail is the exception type

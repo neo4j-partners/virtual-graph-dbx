@@ -12,7 +12,7 @@ import time
 from neo4j import Driver
 from neo4j.exceptions import DriverError, Neo4jError
 
-from helpers import _driver_error, print_table, run_cypher
+from helpers import driver_error, print_table, run_cypher
 from queries import BASIC_QUERIES, BasicQuery
 
 
@@ -49,7 +49,7 @@ def run_basic_query(driver: Driver, query: BasicQuery, max_rows: int, timeout: f
         print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {exc.code}\n  {exc.message}")
         return
     except DriverError as exc:
-        print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {_driver_error(exc)}")
+        print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {driver_error(exc)}")
         return
     elapsed = time.perf_counter() - t0
 
