@@ -192,14 +192,14 @@ Select **Query** from the left-side navigation and run Cypher against the Virtua
 To see transfers between accounts:
 
 ```cypher
-MATCH (a:Account)-[t:TRANSFERRED_TO]->(b:Account)
+MATCH (a:accounts)-[t:TRANSFERRED_TO]->(b:accounts)
 RETURN a, t, b LIMIT 100
 ```
 
 To see the Cypher-to-SQL translation, add `EXPLAIN` to the front of the query:
 
 ```cypher
-EXPLAIN MATCH (a:Account)-[t:TRANSFERRED_TO]->(b:Account)
+EXPLAIN MATCH (a:accounts)-[t:TRANSFERRED_TO]->(b:accounts)
 RETURN a, t, b LIMIT 100
 ```
 
@@ -212,7 +212,7 @@ RETURN a, t, b LIMIT 100
 To group accounts into balance tiers and summarize each tier:
 
 ```cypher
-MATCH (a:Account)
+MATCH (a:accounts)
 WITH a,
      CASE WHEN a.balance < 10000 THEN 'low'
           WHEN a.balance < 100000 THEN 'mid'
@@ -228,7 +228,7 @@ ORDER BY accounts DESC
 Add `EXPLAIN` to the front to see its SQL translation:
 
 ```cypher
-EXPLAIN MATCH (a:Account)
+EXPLAIN MATCH (a:accounts)
 WITH a,
      CASE WHEN a.balance < 10000 THEN 'low'
           WHEN a.balance < 100000 THEN 'mid'
@@ -239,6 +239,72 @@ RETURN balance_tier,
        min(a.holder_age) AS min_age,
        max(a.holder_age) AS max_age
 ORDER BY accounts DESC
+```
+
+### Top merchants by spend
+
+To find which merchants pull the most money, and from how many distinct accounts:
+
+```cypher
+MATCH (a:accounts)-[t:TRANSACTED_WITH]->(m:merchants)
+RETURN m.merchant_name AS merchant,
+       m.category       AS category,
+       count(t)         AS txns,
+       count(DISTINCT a) AS customers,
+       round(sum(t.amount), 2) AS total_spend
+ORDER BY total_spend DESC
+LIMIT 20
+```
+
+### Spend by merchant category
+
+To roll spend up to the category level, the merchant analogue of the balance-tier query above:
+
+```cypher
+MATCH (:accounts)-[t:TRANSACTED_WITH]->(m:merchants)
+RETURN m.category AS category,
+       count(t)   AS txns,
+       round(sum(t.amount), 2) AS total_spend,
+       round(avg(t.amount), 2) AS avg_txn
+ORDER BY total_spend DESC
+```
+
+### Off-hours activity per merchant
+
+To surface merchants with unusual late-night volume, filter on `txn_hour` (0–5 AM):
+
+```cypher
+MATCH (:accounts)-[t:TRANSACTED_WITH]->(m:merchants)
+WHERE t.txn_hour < 6
+RETURN m.merchant_name AS merchant,
+       count(t)        AS offhours_txns,
+       round(sum(t.amount), 2) AS offhours_spend
+ORDER BY offhours_txns DESC
+LIMIT 20
+```
+
+### A single merchant's customers
+
+To build an ego network around one merchant, anchor on its `merchant_id`:
+
+```cypher
+MATCH (a:accounts)-[t:TRANSACTED_WITH]->(m:merchants {merchant_id: 42})
+RETURN a, t, m LIMIT 100
+```
+
+### Accounts sharing a merchant
+
+To find two accounts that both pay the same merchant, the shared-merchant motif from [`finding-fraud.md`](docs/finding-fraud.md):
+
+```cypher
+MATCH (a:accounts)-[:TRANSACTED_WITH]->(m:merchants)<-[:TRANSACTED_WITH]-(b:accounts)
+WHERE a.account_id < b.account_id
+RETURN m.merchant_name AS merchant,
+       a.account_id AS account_a,
+       b.account_id AS account_b,
+       count(*)     AS shared_txns
+ORDER BY shared_txns DESC
+LIMIT 20
 ```
 
 When the queries return accounts and their transfers, the Finance Genie Virtual Graph is live and reading directly from Databricks.
