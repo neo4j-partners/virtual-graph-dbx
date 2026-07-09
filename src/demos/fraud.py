@@ -105,9 +105,10 @@ def run_fraud(driver: Driver, args: argparse.Namespace) -> None:
           f"(timeout {args.timeout:g}s each).")
     slow = [q.number for q in selected if q.tier == "slow"]
     if slow:
-        print(f"WARNING: including slow / unsupported quer"
+        print(f"NOTE: including the heavier quer"
               f"{'y' if len(slow) == 1 else 'ies'} {slow}. These can run for minutes or "
-              f"fail; an abandoned query keeps running server-side and can saturate the "
-              f"10-connection pool. Errors are caught and printed so the run continues.")
+              f"exceed the timeout; an abandoned query keeps running server-side and can "
+              f"tie up the 10-connection pool. Errors are caught and printed so the run "
+              f"continues.")
     for query in selected:
         run_query(driver, query, args.rows, args.timeout, max_transfer, max_opened)

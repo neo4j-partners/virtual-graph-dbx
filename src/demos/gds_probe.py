@@ -1,7 +1,7 @@
 """Gds-probe demo (``--demo gds-probe``).
 
-Isolate the edge-case projection failure where Cypher projections can fail on certain
-relationship property values. The working fast-gds projection maps only labels and
+Isolate the edge case where Cypher projections reject certain relationship property
+values. The working fast-gds projection maps only labels and
 ``relationshipType``; it never projects ``amount`` or
 ``transfer_timestamp`` as graph properties. A GDS in-memory graph only accepts numeric
 property types (Long / Double / numeric arrays), so this probe sweeps a series of

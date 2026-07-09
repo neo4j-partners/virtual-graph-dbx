@@ -1,8 +1,8 @@
 """Slow-gds demo (``--demo slow-gds``).
 
-The GDS forms that do not work, kept to demonstrate the failures: the classic
-``CALL gds.graph.project('g', 'Account', ...)`` form (rejected with ``42NG0``) and a
-large-window projection (trips the 60s Bolt read timeout).
+The GDS forms to steer clear of, shown deliberately: the classic
+``CALL gds.graph.project('g', 'Account', ...)`` form (returns ``42NG0``) and a
+large-window projection (exceeds the 60s Bolt read timeout).
 """
 
 from __future__ import annotations
@@ -41,25 +41,26 @@ RETURN gds.graph.project(
 
 
 def run_slow_gds(args: argparse.Namespace) -> None:
-    """Demonstrate the GDS forms that do not work on the Virtual Graph.
+    """Demonstrate the GDS forms to steer clear of on the Virtual Graph.
 
-    Two failures, both expected and caught: the classic label/type ``CALL
-    gds.graph.project`` form (rejected fast with ``42NG0``), and a full-graph Cypher
-    projection (provisioning stays silent and trips the Bolt read timeout).
+    Two boundary cases, both expected and caught: the classic label/type ``CALL
+    gds.graph.project`` form (returns ``42NG0`` fast), and a full-graph Cypher
+    projection (provisioning stays silent and exceeds the Bolt read timeout).
     """
     uri, auth = load_connection()
 
-    # Leave the server's 60s Bolt read timeout in place: it is what trips a silent full
+    # Leave the server's 60s Bolt read timeout in place: it is what bounds a silent full
     # projection. --read-timeout can raise it or (with 0) disable it; disabling lets the
-    # projection survive past 60s only to be reset by the server on a long provision.
+    # projection continue past 60s only to be reset by the server on a long provision.
     if args.read_timeout is not None:
         seconds = None if args.read_timeout == 0 else args.read_timeout
         override_bolt_read_timeout(seconds)
         shown = "disabled (no timeout)" if seconds is None else f"{seconds:g}s"
         print(f"Bolt read timeout overridden to {shown}.")
-    print("These GDS forms are expected to FAIL. The full projection trips the 60s Bolt "
-          "read timeout (often after minutes of silent provisioning) or is reset by the "
-          "server; it cannot be cancelled and can saturate the pool. Run on a clean instance.")
+    print("These GDS forms are expected to be rejected or time out. The full projection "
+          "exceeds the 60s Bolt read timeout (often after minutes of silent provisioning) "
+          "or is reset by the server; it cannot be cancelled and can tie up the connection "
+          "pool. Run on a clean instance.")
 
     print(f"Connecting to {uri} ...")
     with GraphDatabase.driver(uri, auth=auth) as driver:

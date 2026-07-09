@@ -11,7 +11,7 @@ environment that projects your data into an in-memory graph, runs algorithms, an
 be torn down afterward.
 
 The working path is the **Cypher projection** form shown below. The classic label/type
-`CALL gds.graph.project(...)` form does not work on Virtual Graph. Two constraints shape
+`CALL gds.graph.project(...)` form is not supported on Virtual Graph. Two constraints shape
 what runs: streamed `nodeId`s cannot be resolved back to source ids reliably, and large
 projections can trip the Bolt read-timeout during provisioning (both covered below).
 

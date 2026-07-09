@@ -6,17 +6,18 @@ A single entry point with four demos, selected with ``--demo``:
   ``finding-fraud.md``. The server aggregates and orders; threshold (HAVING)
   filters run here in Python; "recent" windows are passed as a precomputed ``$since``
   parameter; fan-in/fan-out reshape a ``count(DISTINCT)`` into pair-grouping plus a
-  client-side rollup. ``--all`` also attempts the slow / unsupported signals that have
-  no fast form (kept to demonstrate what does not work). See ``queries.py``.
+  client-side rollup. ``--all`` also attempts the heavier signals that have no
+  pushdown-friendly form (included to show where those patterns reach the engine's
+  current limits). See ``queries.py``.
 * ``--demo basic`` — the warm-up exploration / visualization queries from
   ``basic-graph-examples.md``: simple counts and small, anchored traversals that
   show the value of the relationships without any fraud logic.
 * ``--demo fast-gds`` — the working GDS Session + PageRank path over a small, recent
   window of the Account transfer network, provisioned via the Cypher-projection form
   of ``gds.graph.project(...)``. See ``gds-guide.md``.
-* ``--demo slow-gds`` — the GDS forms that do not work, kept to demonstrate the
-  failures: the classic ``CALL gds.graph.project('g', 'Account', ...)`` form (rejected
-  with ``42NG0``) and a large-window projection (trips the 60s Bolt read timeout).
+* ``--demo slow-gds`` — the GDS forms to steer clear of, shown deliberately: the classic
+  ``CALL gds.graph.project('g', 'Account', ...)`` form (returns ``42NG0``) and a
+  large-window projection (exceeds the 60s Bolt read timeout).
 * ``--demo gds-probe`` — sweep projections that add node / relationship properties one
   at a time on a thin window, to isolate which property configs the projection rejects.
   See ``src/demos/gds_probe.py``.

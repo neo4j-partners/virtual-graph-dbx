@@ -7,11 +7,11 @@ The fraud queries come in two tiers:
   recorded in ``docs/plain-cypher-examples-v2.md`` is that these group by scalar ids
   (not whole nodes) and avoid ``count(DISTINCT)`` over a node group, so Databricks does
   the aggregation instead of dragging every row back to the graph engine.
-* ``tier="slow"`` are the shapes that have no fast equivalent. They are kept to
-  demonstrate what does not work on the Virtual Graph and are skipped unless ``--all``
-  is passed. Three are supported but expensive (unbounded two-hop joins, a
-  ``collect(DISTINCT)`` over a node group); one (layering cycles) is genuinely
-  unsupported because it needs a variable-length path (``42NG0``).
+* ``tier="slow"`` are the shapes that have no pushdown-friendly equivalent. They are
+  included to show where these patterns reach the engine's current limits and are skipped
+  unless ``--all`` is passed. Three are supported but expensive (unbounded two-hop joins, a
+  ``collect(DISTINCT)`` over a node group); one (layering cycles) is not yet supported
+  because it needs a variable-length path (``42NG0``).
 
 Two adaptations recur in the fast tier:
 
@@ -223,7 +223,7 @@ RETURN acct AS account_id, merchant_count
         enrich_columns={"merchant_count": 0},
     ),
     # ----------------------------------------------------------------------- #
-    # Slow tier: kept to demonstrate what does not work. Skipped unless --all.
+    # Heavier tier: shows where these patterns reach the engine's limits. Skipped unless --all.
     # Signals with no fast equivalent in docs/plain-cypher-examples-v2.md.
     # ----------------------------------------------------------------------- #
     Query(
