@@ -1,12 +1,11 @@
 """Timezone round-trip demo (``--demo timezone``).
 
-Reproduces the single biggest slow path found in the Virtual Graph verification: the
-engine fires one ``SELECT current_timezone()`` warehouse round trip per TIMESTAMP value
-it materializes into a Cypher datetime, run serially at about 5.5 per second with no
-caching. DATE values and plain scalars cost nothing. See
-``test-results/verify-best.md`` Phases 5 and 9 and ``findings-summary.md``.
+Reproduces a slow path on the Virtual Graph: the engine fires one
+``SELECT current_timezone()`` warehouse round trip per TIMESTAMP value it materializes
+into a Cypher datetime, run serially at about 5.5 per second with no caching. DATE values
+and plain scalars cost nothing.
 
-The demo runs the five discriminating queries from Phase 9, each capped at ``LIMIT 25``:
+The demo runs five discriminating queries, each capped at ``LIMIT 25``:
 
 * A  ``RETURN t``                    relationship carrying a TIMESTAMP  -> 25 calls
 * B  ``RETURN t.amount, t.link_id``  non-temporal scalars               ->  0 calls
@@ -33,7 +32,7 @@ from neo4j.exceptions import DriverError, Neo4jError
 
 from helpers import driver_error, run_cypher
 
-LIMIT = 25  # matches the Phase 9 discriminating runs: one call per returned row, or none
+LIMIT = 25  # one current_timezone() call per returned row, or none
 
 POLL_INTERVAL_S = 180  # poll query history every 3 minutes (ingestion lags ~11 minutes)
 MAX_POLLS = 10  # give up after ~30 minutes and report wall-clock only

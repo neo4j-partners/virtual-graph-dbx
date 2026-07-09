@@ -25,7 +25,7 @@ Virtual Graph. It includes the following demo sets:
 | `basic` | warm-up exploration and visualization queries | yes |
 | `fraud` | the fast fraud-signal queries from `finding-fraud.md` | yes |
 | `fast-gds` | the working GDS Session + PageRank path | yes, on a small window |
-| `slow-gds` | the GDS forms that do not work, kept as a demonstration | no, by design |
+| `slow-gds` | the GDS forms and projection sizes to steer clear of, shown deliberately | by design |
 | `gds-probe` | sweep projections that add node / relationship properties, to isolate which property types the projection rejects | mixed, by design |
 | `timezone` | reproduce the per-row `current_timezone()` round trip that dominates wall-clock on TIMESTAMP results | yes |
 | `100m` | the SQL-side "zero spill from 100K to 100M rows" spike, confirmed against warehouse query history | yes |
@@ -112,7 +112,6 @@ server timeout (default 120s), `--query N` / `--only N M` pick specific fraud qu
 | [`finding-fraud.md`](docs/finding-fraud.md) | Plain-English walkthrough of the fraud-signal queries and how to read them (backs `--demo fraud`). |
 | [`best-practices.md`](best-practices.md) | How to write Cypher that pushes down well to Databricks, plus how the warehouse and the connection pool shape performance. |
 | [`gds-guide.md`](gds-guide.md) | How to run Graph Data Science via a GDS Session on a Virtual Graph, including the no-write-back constraint. |
-| [`gds-limitations.md`](gds-limitations.md) | Findings and current limitations from running GDS against a Virtual Graph. |
 
 ## What the demos provide
 
@@ -125,8 +124,7 @@ relationships without any fraud logic.
 - `graph` queries return nodes and relationships, so the CLI prints only a row count and
   timing. Paste them into the Aura Workspace Query tab to see the picture.
 - The demo prints the anchor account and merchant IDs it picked.
-- Queries 12-15 are pushdown demonstrations from
-  [`verify-best.md`](test-results/verify-best.md): UNION ALL becomes two pushed SQL
+- Queries 12-15 are pushdown demonstrations: UNION ALL becomes two pushed SQL
   statements, and a `LIMIT 25` pushes down at every depth (bounding the rows returned, not
   the join work behind them).
 
@@ -170,18 +168,19 @@ The seven fast queries (1-7) are the pushdown-friendly forms from
 | 6 | Spray accounts (fan-out): one account paying many distinct recipients | works |
 | 7 | Courier accounts: heavy peer-to-peer transfers, little merchant spend | works |
 
-The slow tier (8-11) has no fast equivalent and is kept to demonstrate what does not work.
+The heavier tier (8-11) has no pushdown-friendly form; it is included to show where these
+patterns reach the engine's current limits and to point at the plain-Cypher alternatives.
 
 - Skipped unless you pass `--all`.
-- With `--all`, these run behind a printed warning, bounded by `--timeout`.
+- With `--all`, these run behind a printed note, bounded by `--timeout`.
 - Any error is caught and printed so the run continues.
 
-| # | What it does | Status |
+| # | What it does | Behavior |
 |---|---|---|
-| 8 | Pass-through mule (local betweenness proxy) | slow: unbounded two-hop join, usually times out |
-| 9 | Shared-merchant burst (coordinated ring) | slow: `collect(DISTINCT)` over a node group, hit the 120s timeout |
-| 10 | Rapid-turnover per account | slow: unbounded two-hop join, usually times out |
-| 11 | Layering cycles | unsupported: variable-length path `{2,4}` fails with `42NG0` |
+| 8 | Pass-through mule (local betweenness proxy) | expensive: unbounded two-hop join, typically exceeds the timeout |
+| 9 | Shared-merchant burst (coordinated ring) | expensive: `collect(DISTINCT)` over a node group, exceeded the 120s timeout |
+| 10 | Rapid-turnover per account | expensive: unbounded two-hop join, typically exceeds the timeout |
+| 11 | Layering cycles | not yet supported: variable-length path `{2,4}` returns `42NG0` |
 
 ### `fast-gds` demo
 
@@ -212,7 +211,7 @@ Notes:
 - Streamed `nodeId`s are GDS-internal IDs, not `account_id`s. Resolving them back is not
   reliable on the Virtual Graph yet, so the demo streams the raw ID and score.
 - **Keep the window small.** A thin window (`--since-hours 2`, a few hundred edges)
-  provisions and completes; the default 7-day window is about 23,000 edges, which trips
+  provisions and completes; the default 7-day window is about 23,000 edges, which exceeds
   the read timeout during provisioning (see the `slow-gds` demo below).
 
 Flags:
@@ -225,17 +224,17 @@ Flags:
 
 ### `slow-gds` demo
 
-Demonstrates the two GDS failure modes on the Virtual Graph, both caught and printed:
+Demonstrates the two GDS forms to steer clear of on the Virtual Graph, both caught and printed:
 
 | Statement | What happens |
 |---|---|
-| Classic `CALL gds.graph.project('g', 'Account', 'TRANSFERRED_TO')` | rejected fast with `42NG0` (the label/type form is not supported) |
-| Full-graph Cypher projection (every transfer) | provisions a session whose long, silent provisioning trips the 60s Bolt read timeout (observed at ~240s) or is reset by the server |
+| Classic `CALL gds.graph.project('g', 'Account', 'TRANSFERRED_TO')` | returns `42NG0` fast (the label/type form is not supported; use the Cypher-projection form) |
+| Full-graph Cypher projection (every transfer) | provisions a session whose long, silent provisioning exceeds the 60s Bolt read timeout (observed at ~240s) or is reset by the server |
 
-- `--read-timeout 0` lets the full projection survive past 60s to show the later server
+- `--read-timeout 0` lets the full projection continue past 60s to show the later server
   reset.
-- The full projection cannot be cancelled once started and can saturate the pool, so run
-  this on a clean instance.
+- The full projection cannot be cancelled once started and can tie up the connection pool,
+  so run this on a clean instance.
 
 ### `gds-probe` demo
 
@@ -269,7 +268,7 @@ you add properties:
 
 ### `timezone` demo
 
-The single largest slow path the verification found:
+The largest per-row cost on TIMESTAMP results, and how to keep it out of hot paths:
 
 - When a result carries TIMESTAMP values, the engine makes one `SELECT current_timezone()`
   round trip to the warehouse for every value it materializes into a Cypher datetime, run
@@ -298,8 +297,7 @@ Two signals are reported:
   statements ingest, then prints the per-run counts.
 
 Flags: `--no-history` reports wall-clock only; `--history-wait S` sets the initial wait
-before the first poll. See [`findings-summary.md`](findings-summary.md) and
-[`verify-best.md`](test-results/verify-best.md) Phases 5 and 9.
+before the first poll.
 
 ### `100m` demo
 
@@ -337,9 +335,6 @@ Flags:
 - `--skip-history` runs the C-queries but skips the history wait (spill left unconfirmed).
 - `--warehouse` overrides the warehouse.
 
-See [`findings-summary.md`](findings-summary.md) and
-[`perf-tests-results-v2.md`](test-results/perf-tests-results-v2.md) Spike 1.
-
 ### Support scripts
 
 These standalone scripts probe and stress the Virtual Graph; they share the connection
@@ -351,38 +346,3 @@ helper in `src/connection.py` (reads the project `.env`, or `PROBE_ENV` if set):
   per-query cap and a pool health check between each.
 - `vg-viz` (`src/viz_check.py`): find real flagged accounts and confirm each anchored
   visualization renders small and fast.
-
-## Reproducing the warehouse performance tests
-
-For a condensed digest of every finding (warehouse sizing, GDS cost, the timezone round
-trip, and what pushes down versus what stays engine-side), start with
-[`findings-summary.md`](findings-summary.md); it links back to the source documents below.
-
-The [`test-results/`](test-results/) directory holds the performance and verification work:
-
-- [`perf-test.md`](test-results/perf-test.md): the seven-phase plan.
-- [`perf-tests-results.md`](test-results/perf-tests-results.md): the recorded timings.
-- [`perf-tests-results-v2.md`](test-results/perf-tests-results-v2.md): the Test set C ramp spike.
-- [`verify-best.md`](test-results/verify-best.md): the best-practices verification.
-
-To re-run them, three roles each have one tool that owns them:
-
-| Role | Tool | Notes |
-|---|---|---|
-| **Reported timings** (the seconds in the results tables) | `vg-probe` client wall-clock | The load-bearing metric: `uv run vg-probe "<cypher>"`, the time the client waits for one statement. Not a Databricks measurement. |
-| **Warehouse lifecycle** (cache-clearing restart, resize) | `databricks warehouses` CLI, or the `manage_sql_warehouse` MCP tool | `databricks warehouses stop/start/get <id>` clears the cache; resize with `databricks warehouses update <id> --cluster-size "Small"` or `manage_sql_warehouse(action="modify", ...)`. |
-| **Databricks metrics** (exec time, spill, rows) | Databricks SQL Statements API via the CLI (primary); MCP `execute_sql` (optional) | Pull `system.query.history` with `databricks api post /api/2.0/sql/statements`, submitting async (`wait_timeout: "5s"`, `on_wait_timeout: "CONTINUE"`) and polling. |
-
-Why this order:
-
-- **The metrics pull leads with the Statements API, not the MCP `execute_sql` tool.** The
-  MCP tool has a hard 60-second cap that ignores its timeout argument, and the history scans
-  outrun it.
-- **The async Statements API has no cap** and needs only the CLI plus a profile, which the
-  lifecycle commands already require.
-- **MCP `execute_sql` stays as an optional convenience**, usable when the scan is kept cheap.
-- **`vg-probe` wall-clock is the primary reported metric** because `system.query.history`
-  lags about 11 minutes; the Databricks-side detail only confirms what the wall-clock showed.
-
-For the full worked example, one phase run end to end with every command, see
-[`test-results/reproducing-warehouse-tests.md`](test-results/reproducing-warehouse-tests.md).

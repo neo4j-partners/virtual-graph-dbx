@@ -1,9 +1,8 @@
 """100m demo (``--demo 100m``).
 
-Reproduces the "Zero spill from 100K to 100M rows" finding
-(``findings-summary.md``; the full method is ``test-results/perf-tests-results-v2.md``
-Spike 1). Unlike the other demos, this one talks SQL straight to the Databricks
-warehouse rather than Cypher over Bolt, because the finding is the SQL-side spike: it
+Reproduces the "Zero spill from 100K to 100M rows" finding. Unlike the other demos, this
+one talks SQL straight to the Databricks warehouse rather than Cypher over Bolt, because
+the finding is the SQL-side spike: it
 runs the aggregation SQL that the Virtual Graph pushes down to, directly against
 ``account_links_large``, and reads ``spill_to_disk_bytes`` from the warehouse query
 history to show the warehouse never spills.
@@ -113,7 +112,7 @@ def run_sql(client: object, warehouse_id: str, statement: str, *,
 
 
 def build_sql(table: str, accounts: str, n: int) -> str:
-    """The CTAS that builds ``account_links_large`` at ``n`` rows (perf-tests-results-v2)."""
+    """The CTAS that builds ``account_links_large`` at ``n`` rows."""
     return f"""CREATE OR REPLACE TABLE {table}
 USING DELTA
 PARTITIONED BY (transfer_date)

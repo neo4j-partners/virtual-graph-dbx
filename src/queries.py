@@ -459,7 +459,7 @@ LIMIT 25
 """,
     ),
     # ------------------------------------------------------------------- #
-    # Pushdown demonstrations (verified in verify-best.md, Phases 6-7).
+    # Pushdown demonstrations.
     # ------------------------------------------------------------------- #
     BasicQuery(
         number=12,

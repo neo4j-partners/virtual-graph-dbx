@@ -18,15 +18,15 @@ A single entry point with four demos, selected with ``--demo``:
   failures: the classic ``CALL gds.graph.project('g', 'Account', ...)`` form (rejected
   with ``42NG0``) and a large-window projection (trips the 60s Bolt read timeout).
 * ``--demo gds-probe`` — sweep projections that add node / relationship properties one
-  at a time on a thin window, to isolate which property configs the projection rejects
-  (the edge-case bug in ``gds-limitations.md``). See ``src/demos/gds_probe.py``.
+  at a time on a thin window, to isolate which property configs the projection rejects.
+  See ``src/demos/gds_probe.py``.
 * ``--demo timezone`` — reproduce the per-row ``current_timezone()`` round trip: run the
-  five Phase 9 discriminating queries (``LIMIT 25`` each) and show TIMESTAMP-bearing
+  five discriminating queries (``LIMIT 25`` each) and show TIMESTAMP-bearing
   results are slow while scalar / DATE results are fast. With the Databricks SDK
   installed and a warehouse configured, also pull query history and count the actual
   ``current_timezone()`` statements per run. See ``src/demos/timezone.py``.
-* ``--demo 100m`` — the SQL-side "Zero spill from 100K to 100M rows" spike from
-  ``findings-summary.md``. Talks SQL straight to the backing warehouse via the Databricks
+* ``--demo 100m`` — the SQL-side "Zero spill from 100K to 100M rows" spike.
+  Talks SQL straight to the backing warehouse via the Databricks
   SDK (not Bolt): runs the C1/C2/C3 aggregation SQL the Virtual Graph pushes down to,
   then polls warehouse query history (after its 11-25 min lag, with a countdown) to
   confirm ``spill_to_disk_bytes = 0``. Needs the history extra (``uv sync --extra
