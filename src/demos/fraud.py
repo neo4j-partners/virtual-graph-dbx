@@ -1,10 +1,10 @@
 """Fraud demo (``--demo fraud``).
 
-The fast, pushdown-friendly fraud-signal queries from ``finding-fraud.md``. The
-server aggregates and orders; threshold (HAVING) filters run here in Python; "recent"
-windows are passed as a precomputed ``$since`` parameter; fan-in/fan-out reshape a
-``count(DISTINCT)`` into pair-grouping plus a client-side rollup. ``--all`` also attempts
-the slow / unsupported signals that have no fast form. See ``queries.py``.
+The fraud-signal queries 1-10 from ``finding-fraud.md``. The server aggregates,
+applies each threshold (a ``WHERE`` after the aggregating ``WITH``), orders and limits;
+"recent" windows are passed as a precomputed ``$since`` parameter. Only the courier
+query still merges two halves and filters here in Python. Query 11 is documented but
+unsupported on the Virtual Graph, so it is never run. See ``queries.py``.
 """
 
 from __future__ import annotations
@@ -37,15 +37,13 @@ def merge_enrichment(rows: list[Row], enrich_rows: list[Row], key: str,
 
 def run_query(driver: Driver, query: Query, max_rows: int, timeout: float,
               max_transfer: DateTime, max_opened: Date) -> None:
-    """Execute one query, roll up / merge, apply the threshold, and print."""
-    if not query.vg_supported:
-        marker = "unsupported"
-    elif query.tier == "slow":
-        marker = "slow"
-    else:
-        marker = "OK"
+    """Execute one query, merge any enrichment, apply a client filter, and print."""
+    marker = "OK" if query.vg_supported else "unsupported"
     print(f"\n{'=' * 78}")
     print(f"[{query.number}] {query.title}  (Virtual Graph: {marker})")
+    if not query.vg_supported:
+        print(f"  Not run. {query.note}")
+        return
     if query.note:
         print(f"  note: {query.note}")
     print("=" * 78)
@@ -58,23 +56,28 @@ def run_query(driver: Driver, query: Query, max_rows: int, timeout: float,
     t0 = time.perf_counter()
     try:
         rows = run_cypher(driver, query.cypher, params, timeout)
-        if query.rollup is not None:
-            rows = query.rollup(rows)
         if query.enrich_cypher is not None:
             enrich_rows = run_cypher(driver, query.enrich_cypher, {}, timeout)
             merge_enrichment(rows, enrich_rows, query.enrich_key, query.enrich_columns)
     except Neo4jError as exc:
-        note = " (expected, unsupported on the Virtual Graph)" if not query.vg_supported else ""
-        print(f"  ERROR{note} after {time.perf_counter() - t0:.1f}s: {exc.code}\n  {exc.message}")
+        print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {exc.code}\n"
+              f"  {exc.message}")
         return
     except DriverError as exc:
         print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {driver_error(exc)}")
         return
     elapsed = time.perf_counter() - t0
+    if query.row_transform is not None:
+        for row in rows:
+            query.row_transform(row)
 
-    matched = [r for r in rows if query.client_filter is None or query.client_filter(r)]
-    print(f"  OK {elapsed:.1f}s; {len(rows)} aggregated row(s); "
-          f"{len(matched)} pass the threshold")
+    if query.client_filter is None:
+        matched = rows
+        print(f"  OK {elapsed:.1f}s; {len(matched)} row(s)")
+    else:
+        matched = [r for r in rows if query.client_filter(r)]
+        print(f"  OK {elapsed:.1f}s; {len(rows)} server row(s); "
+              f"{len(matched)} pass the client-side threshold")
     print_table(matched[: max_rows], max_rows, total_matched=len(matched))
 
 
@@ -91,9 +94,7 @@ def select_queries(args: argparse.Namespace) -> list[Query]:
         if args.query not in by_number:
             sys.exit(f"No query numbered {args.query} (valid: 1-{len(QUERIES)})")
         return [by_number[args.query]]
-    if args.all:
-        return list(QUERIES)
-    return [q for q in QUERIES if q.tier == "fast"]
+    return [q for q in QUERIES if q.vg_supported]
 
 
 def run_fraud(driver: Driver, args: argparse.Namespace) -> None:
@@ -103,12 +104,5 @@ def run_fraud(driver: Driver, args: argparse.Namespace) -> None:
     print(f"Connected. Data max transfer={max_transfer}, max opened={max_opened}.")
     print(f"Running {len(selected)} quer{'y' if len(selected) == 1 else 'ies'} "
           f"(timeout {args.timeout:g}s each).")
-    slow = [q.number for q in selected if q.tier == "slow"]
-    if slow:
-        print(f"NOTE: including the heavier quer"
-              f"{'y' if len(slow) == 1 else 'ies'} {slow}. These can run for minutes or "
-              f"exceed the timeout; an abandoned query keeps running server-side and can "
-              f"tie up the 10-connection pool. Errors are caught and printed so the run "
-              f"continues.")
     for query in selected:
         run_query(driver, query, args.rows, args.timeout, max_transfer, max_opened)

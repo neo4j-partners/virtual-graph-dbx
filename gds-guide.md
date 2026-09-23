@@ -6,14 +6,13 @@ Virtual Graph by creating a **GDS Session**.
 ## Background
 
 GDS is **not** supported as an in-database plugin on Virtual Graph. The only way to
-run graph algorithms is through **GDS Sessions** — an ephemeral, on-demand compute
-environment that projects your data into an in-memory graph, runs algorithms, and can
-be torn down afterward.
+run graph algorithms is through **GDS Sessions**. A GDS Session is an ephemeral, on-demand
+compute environment. It projects your data into an in-memory graph, runs algorithms, and
+can be torn down afterward.
 
-The working path is the **Cypher projection** form shown below. The classic label/type
-`CALL gds.graph.project(...)` form is not supported on Virtual Graph. Two constraints shape
-what runs: streamed `nodeId`s cannot be resolved back to source ids reliably, and large
-projections can trip the Bolt read-timeout during provisioning (both covered below).
+The working path is the **Cypher projection** form shown below. Streamed `nodeId`s decode
+back to source IDs with a simple bit formula, covered below. Session provisioning takes
+31 to 44 seconds. A projection of all 300,000 transfers completes in about 41 seconds.
 
 ## When you need GDS, and when plain Cypher is enough
 
@@ -52,45 +51,75 @@ Without one of these, the call won't start a session.
 ## Recommended pattern: Cypher projection
 
 On Virtual Graph, express the projection as a `MATCH ... RETURN gds.graph.project(...)`
-statement rather than the label/type `CALL` form. The projection takes node and
-relationship objects, with the label/type details carried in the `dataConfig`
-parameter, and the memory/instance config supplied as the final argument.
+statement. The projection takes the source and target nodes. The label and type details
+go in the `dataConfig` parameter, and the memory config is the final argument.
+
+This is the projection the `fast-gds` demo runs. It projects the `TRANSFERRED_TO`
+relationships between accounts from a recent time window:
 
 ```cypher
-MATCH (person:Person)-[wrote:WROTE]->(movie:Movie)
+MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
+WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
 RETURN gds.graph.project(
-  'writersGraph',
-  person,
-  movie,
+  'transfers',
+  src,
+  dst,
   {
-    sourceNodeLabels: labels(person),
-    targetNodeLabels: labels(movie),
-    relationshipType: type(wrote)
+    sourceNodeLabels: labels(src),
+    targetNodeLabels: labels(dst),
+    relationshipType: type(t)
   },
   { memory: '2GB' }
 )
 ```
 
-The first config object (`dataConfig`) describes the graph structure; the final config
-object (`{ memory: '2GB' }`) is what provisions the session.
+The first config object, `dataConfig`, describes the graph structure. The final config
+object, `{ memory: '2GB' }`, is what provisions the session.
 
-### Applied to a social graph
+The `WHERE` clause picks the edges to project. The demo computes the window start from the
+dataset's latest transfer and passes it as `$since`, because temporal arithmetic inside a
+`WHERE` is unsupported. Drop the `WHERE` to project all 300,000 transfers.
 
-For a `USER`-`IS_FRIEND`-`USER` model, the equivalent projection looks like:
+### Projecting a relationship weight
+
+Add `relationshipProperties` to the `dataConfig` to carry a numeric property into the
+graph. This projection keeps the transfer amount so an algorithm can use it as a weight:
 
 ```cypher
-MATCH (user:USER)-[friend:IS_FRIEND]->(:USER)
+MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
+WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
 RETURN gds.graph.project(
-  'socialGraph',
-  user,
-  friend,
+  'transfersWeighted',
+  src,
+  dst,
   {
-    sourceNodeLabels: labels(user),
-    relationshipType: type(friend)
+    sourceNodeLabels: labels(src),
+    targetNodeLabels: labels(dst),
+    relationshipType: type(t),
+    relationshipProperties: { amount: t.amount }
   },
   { memory: '2GB' }
 )
 ```
+
+A weighted projection provisions in the same time as an unweighted one.
+
+## ID requirements
+
+The official [GDS page](https://neo4j.com/docs/virtual-graph/aura/gds/) sets two rules for
+a GDS projection on a Virtual Graph.
+
+- **The GDS call comes last.** The `gds.graph.project(...)` call must be the last part of
+  the query, as in the `MATCH ... RETURN gds.graph.project(...)` form above.
+- **Every ID column is a single integer.** The ID column of each projected node and
+  relationship table must be a single column, not a composite key. It must hold a 50-bit
+  unsigned integer, from 0 to 1,125,899,906,842,623. It must also be unique within its
+  source table.
+
+A projection that breaks the ID rule fails with `42NG1: Unsupported syntax: Unsupported id`.
+The Finance Genie IDs meet the rule: `account_id`, `merchant_id`, `txn_id`, and `link_id`
+are all single integer columns. A model that uses a string or concatenated key works for
+plain Cypher but cannot be projected into GDS.
 
 ## Project only numeric properties
 
@@ -106,30 +135,79 @@ The property `relationship.ts` contained a value of type `DateTime`, which is no
 The property `sourceNode.account_hash` contained a value of type `String`, which is not supported.
 ```
 
-So `relationshipProperties: { amount: t.amount }` (a numeric column) projects and is
-usable as a `relationshipWeightProperty`, while `relationshipProperties: { ts:
-t.transfer_timestamp }` (a `DateTime`) is rejected. Project only the numeric columns you
-need for the algorithm, and cast or drop temporal and string columns. The `gds-probe`
-demo (`src/demos/gds_probe.py`, run with `uv run vg-demo --demo gds-probe`) sweeps these
-property configs and prints which project and which are rejected. This is standard GDS
-typing behavior, not specific to the Virtual Graph.
+So `relationshipProperties: { amount: t.amount }` projects and is usable as a
+`relationshipWeightProperty`. For time, convert the timestamp to epoch milliseconds in a
+`WITH` before the projection:
+
+```cypher
+MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
+WHERE t.transfer_timestamp >= $since
+WITH src, dst, t, toInteger(t.transfer_timestamp) * 1000 AS transfer_timestamp_ms
+RETURN gds.graph.project(
+  $graph,
+  src,
+  dst,
+  { sourceNodeLabels: labels(src),
+    targetNodeLabels: labels(dst),
+    relationshipType: type(t),
+    relationshipProperties: { transfer_timestamp_ms: transfer_timestamp_ms } },
+  { memory: $memory }
+) AS result
+```
+
+The Virtual Graph pushes `toInteger()` on a timestamp down to SQL as epoch seconds, and
+the form raises no warning. Every transfer timestamp is a whole second, so `* 1000` gives
+the same values as `epochMillis`. Reading `.epochMillis` off the property returns those
+values too, but the server flags it with the `01N52` unknown-property warning. The
+conversion has to go through the `WITH`, because `toInteger()` on a timestamp inside the
+config map fails with `22N38`. Stock Cypher rejects `toInteger()` on a timestamp, so this
+form is specific to the Virtual Graph. Keep string identifiers such as
+`account_hash` outside the GDS projection and join them to streamed account IDs in the
+application when needed. The `gds-probe` demo (`src/demos/gds_probe.py`, run with
+`uv run vg-demo --demo gds-probe`) projects the supported numeric values and skips
+non-numeric node properties before provisioning. This is standard GDS typing behavior.
 
 ## Running an algorithm
 
 Once the session and projection exist, run algorithms against the named graph:
 
 ```cypher
-CALL gds.pageRank.stream('socialGraph')
+CALL gds.pageRank.stream('transfers')
 YIELD nodeId, score
 RETURN nodeId, score
 ORDER BY score DESC
 LIMIT 10
 ```
 
-The standalone `CALL gds.<algorithm>.stream(...)` form works. The stream returns
-GDS-internal `nodeId`s; resolving them back to `account_id`s is not reliable yet, so
-stream the raw id and score.
+On the weighted projection, name the property as the weight. PageRank then ranks accounts
+by the money that flows into them, not only by the number of senders:
 
+```cypher
+CALL gds.pageRank.stream('transfersWeighted', { relationshipWeightProperty: 'amount' })
+YIELD nodeId, score
+RETURN nodeId, score
+ORDER BY score DESC
+LIMIT 10
+```
+
+Weighted PageRank works. The `gds-probe` sweep runs it on the 7-day window after
+projecting the `amount` property.
+
+The standalone `CALL gds.<algorithm>.stream(...)` form works. The stream returns
+GDS-internal `nodeId`s. Each one encodes the source table in its top bits and the source ID
+in its low 50 bits, shifted left by one. This formula recovers the `account_id`:
+
+```
+account_id = (nodeId & (2^50 - 1)) >> 1
+```
+
+The formula was checked against in-degree on live PageRank runs. On a 2-hour window, the
+accounts with the highest scores matched the accounts with the highest in-window in-degree
+exactly. On the 7-day window, the top 10 accounts each have 18 to 24 incoming transfers,
+against a mean of about 2.4. Six of them are in the top 17 by in-degree. PageRank weighs
+who sends to an account, not only how many, so a close but inexact match is expected. The
+`fast-gds` demo applies this formula and prints the decoded `account_id` next to each
+streamed `nodeId`.
 
 ## No write-back
 
@@ -142,35 +220,69 @@ handling results include:
 - Keeping the session alive and serving from it as an ephemeral cache (re-create the
   projection if it expires).
 
-For production GDS on Snowflake, the **GDS native app** is the intended path.
-
 ## Tested: the working path
 
 A live test ran the Cypher projection form for PageRank over `Account` nodes and
-`TRANSFERRED_TO` relationships against instance `ge224c32`, backed by a 2X-Small
-Serverless Starter warehouse. The Sessions path works end to end: it provisions a
-session, registers an in-memory graph, streams PageRank, and drops cleanly. The harness
-is the `fast-gds` demo (`src/demos/gds_fast.py`, run with `uv run vg-demo --demo fast-gds`).
+`TRANSFERRED_TO` relationships against instance `ge7826b1`. The Sessions path works end
+to end: it provisions a session, registers an in-memory graph, streams PageRank, and drops
+cleanly. The harness is the `fast-gds` demo (`src/demos/gds_fast.py`, run with
+`uv run vg-demo --demo fast-gds`).
 
-The "window" here is a time-range filter on the transfer rows: `--since-hours` /
-`--since-days` keep only transfers from the most recent N hours or days of the data, and
-the resulting row count is the edge count projected into the graph. Filtering to the most
-recent 1.5 hours (233 transfers, so 233 edges) ran the full path successfully:
+The "window" here is a time-range filter on the transfer rows. `--since-days` and
+`--since-hours` keep only transfers from the most recent N days or hours of the data. The
+resulting row count is the edge count projected into the graph. The default is 7 days. A
+run on 2026-09-23 with the default window produced these timings:
 
-- Sizing count: 0.5s for 233 edges, no session.
-- Projection that provisions the session: 128.8s, returning a registered graph of 438
-  nodes and 233 relationships. The returned `projectMillis` was 127670, so almost the
-  entire call is session provisioning. The Databricks data pull is sub-second, as
-  separately confirmed in query history.
-- `gds.pageRank.stream`: 2.5s for the top 10 accounts, with real scores.
-- `gds.graph.drop`: about 1s.
+- Sizing count: 3.2s for 23,198 edges, no session.
+- Projection that provisions the session: 38.0s, returning a registered graph of 15,588
+  nodes and 23,198 relationships. The returned `projectMillis` was 34,835.
+- `gds.pageRank.stream`: 2.3s for the top 10 accounts, with real scores.
+- `gds.graph.drop`: 1.2s.
 
-The dominant cost is Aura Graph Analytics session provisioning, the cold start of the
-ephemeral compute, not the Databricks query or the algorithm itself.
+The Databricks query behind the projection took about 1 second. Almost the entire
+projection call is session provisioning, the cold start of the ephemeral compute. The
+Databricks query and the algorithm are small by comparison. Provisioning took 31 to 44
+seconds across runs, and it was about the same for 298 edges as for 23,198.
 
-**Keep projections small.** A small projection is the reliable path today: the 233-edge
-projection from the 1.5-hour window completed cleanly, and small projections provision
-faster. A wider time window with more transfers can exceed the 60 second Bolt read timeout
-during provisioning or hit a server reset, so scope the window until the projection
-provisions reliably. Use `--count-only` to count the rows in a window for free and
-`--keep` to reuse a provisioned session.
+**Projection size is flexible.** A projection of all 300,000 transfers completed in 41.0s.
+Provisioning is most of that time. Use `--count-only` to count the rows in a window for
+free and `--keep` to reuse a provisioned session.
+
+**The property sweep.** The `gds-probe` demo runs scenarios A to E on the same 7-day
+window. Each scenario provisions its own session and projects in 34 to 46 seconds.
+
+**Clean up after a dropped connection.** If the Bolt connection drops during a run, the
+demo cannot drop its graph. A default `fast-gds` run uses a new graph name with a random
+suffix, so a leftover graph cannot block the next run. If the projection fails with a
+session conflict, the demo retries once under a new name. With `--graph`, the demo drops a
+stale graph of that name before it starts. `gds-probe` drops a stale graph of its name
+before each scenario. To check for
+leftovers, run `CALL gds.graph.list()`.
+
+## Future expansion: possible new examples
+
+Session provisioning is the fixed cost, and each algorithm after it runs in seconds. The
+best new examples project once and run several algorithms on the same session. These are
+candidates. None of them has been built or tested on the Virtual Graph yet.
+
+- **Money-flow PageRank:** Weighted PageRank on the transfer amount ranks accounts by the
+  value flowing into them. The `gds-probe` demo already shows that the weighted projection
+  and algorithm work.
+- **Fraud rings with WCC:** Weakly Connected Components splits the transfer graph into
+  connected groups of accounts. Small, dense components are ring candidates. This is the
+  GDS form of the ring-discovery row in the table above.
+- **Communities with Louvain:** Louvain finds groups of accounts that transfer mostly
+  among themselves, even when those groups connect to the rest of the graph.
+- **Shared merchants with Node Similarity:** A projection of `Account` to `Merchant` over
+  `TRANSACTED_WITH` lets Node Similarity score pairs of accounts that shop at the same
+  merchants. This is the GDS counterpart of the shared-merchant burst query.
+- **Bridge accounts with Betweenness:** Betweenness centrality scores the accounts that
+  sit between groups, the layering accounts in a money-laundering chain. Its run time at
+  25,000 nodes needs testing.
+- **GDS then Cypher:** Take the top PageRank accounts, decode their IDs, and pass them to
+  a plain Cypher query on the Virtual Graph, such as the pass-through mule check. GDS
+  finds the suspects, and Cypher explains them.
+
+A single `gds-examples` demo could run money-flow PageRank, WCC, Louvain, and the GDS then
+Cypher step on one 7-day session. It would cost one provisioning plus a few seconds for
+each algorithm.

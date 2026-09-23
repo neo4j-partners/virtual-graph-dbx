@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 PROJECT_ENV = Path(__file__).resolve().parents[1] / ".env"
 
@@ -25,7 +25,7 @@ VG_BACKING_WAREHOUSE = "b0fffb8e3255bf85"
 
 
 def _resolve_env_file(env_file: Path | None) -> Path:
-    """Resolve which dotenv to read: explicit arg, then ``PROBE_ENV``, then project ``.env``."""
+    """Resolve the dotenv to read: explicit arg, then ``PROBE_ENV``, then ``.env``."""
     if env_file is None:
         override = os.environ.get("PROBE_ENV")
         env_file = Path(override).expanduser() if override else PROJECT_ENV
@@ -46,19 +46,26 @@ class DatabricksConfig:
 def load_databricks_config(env_file: Path | None = None) -> DatabricksConfig:
     """Read the Databricks profile and Unity Catalog defaults from the project ``.env``.
 
-    The 100m demo talks SQL to the warehouse via the ``databricks`` CLI rather than
-    Bolt, so it needs the CLI profile and the catalog/schema that hold
-    ``account_links_large``. The warehouse id is not read from here on purpose: the
-    backing VG warehouse (``VG_BACKING_WAREHOUSE``) is the one that runs the test, and
-    the env file's warehouse points elsewhere.
+    The 100m demo talks SQL to the warehouse via the Databricks SDK
+    (``WorkspaceClient``) rather than Bolt, so it needs the config profile and the
+    catalog/schema that hold ``account_links_large``. The warehouse id is not read
+    from here on purpose: the backing VG warehouse (``VG_BACKING_WAREHOUSE``) is the
+    one that runs the test, and the env file's warehouse points elsewhere.
+
+    The dotenv is read without exporting it into ``os.environ``. The SDK resolves
+    environment variables before the profile file, so an exported ``DATABRICKS_HOST``,
+    ``DATABRICKS_CLUSTER_ID`` or ``DATABRICKS_WAREHOUSE_ID`` from ``.env`` would
+    override the chosen profile's values. Values in the file still take precedence
+    over the shell, as ``load_dotenv(override=True)`` did.
     """
-    load_dotenv(_resolve_env_file(env_file), override=True)
-    profile = (os.environ.get("DATABRICKS_CONFIG_PROFILE")
-               or os.environ.get("DATABRICKS_PROFILE") or "DEFAULT")
-    catalog = (os.environ.get("DATABRICKS_CATALOG")
-               or os.environ.get("CATALOG") or "graph-on-databricks")
-    schema = (os.environ.get("DATABRICKS_SCHEMA")
-              or os.environ.get("SCHEMA") or "graph-enriched-schema")
+    file_values = dotenv_values(_resolve_env_file(env_file))
+    env = {**os.environ, **{k: v for k, v in file_values.items() if v is not None}}
+    profile = (env.get("DATABRICKS_CONFIG_PROFILE")
+               or env.get("DATABRICKS_PROFILE") or "DEFAULT")
+    catalog = (env.get("DATABRICKS_CATALOG")
+               or env.get("CATALOG") or "graph-on-databricks")
+    schema = (env.get("DATABRICKS_SCHEMA")
+              or env.get("SCHEMA") or "graph-enriched-schema")
     return DatabricksConfig(profile=profile, catalog=catalog, schema=schema)
 
 

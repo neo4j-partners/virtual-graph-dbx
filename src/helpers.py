@@ -33,7 +33,8 @@ def data_max_dates(driver: Driver) -> tuple[DateTime, Date]:
     return max_transfer, max_opened
 
 
-def since_param(query: Query, max_transfer: DateTime, max_opened: Date) -> dt.datetime | dt.date:
+def since_param(query: Query, max_transfer: DateTime,
+                max_opened: Date) -> dt.datetime | dt.date:
     """Compute the ``$since`` cutoff for a windowed query."""
     window = dt.timedelta(days=query.since_window_days)
     if query.since_source == "opened":
@@ -69,7 +70,8 @@ def print_table(rows: list[Row], max_rows: int, total_matched: int) -> None:
     print("  " + "  ".join(col.ljust(widths[col]) for col in columns))
     print("  " + "  ".join("-" * widths[col] for col in columns))
     for row in rows:
-        print("  " + "  ".join(_fmt(row.get(col)).ljust(widths[col]) for col in columns))
+        cells = (_fmt(row.get(col)).ljust(widths[col]) for col in columns)
+        print("  " + "  ".join(cells))
     if total_matched > max_rows:
         print(f"  ... {total_matched - max_rows} more matching row(s)")
 
@@ -86,9 +88,9 @@ def driver_error(exc: DriverError) -> str:
     """One-line description of a client-side driver failure (timeout, lost connection).
 
     These are not server ``Neo4jError`` codes; the useful detail is the exception type
-    and its underlying cause (often ``TimeoutError`` from the 60s Bolt read timeout the
-    fraud and basic paths do not override). The query usually keeps running server-side,
-    so the run continues with the next query rather than aborting.
+    and its underlying cause (often ``TimeoutError`` from the server's 60s Bolt read
+    timeout). The query usually keeps running server-side, so the run continues with the
+    next query rather than aborting.
     """
     cause = exc.__cause__
     suffix = f" (cause: {type(cause).__name__})" if cause is not None else ""

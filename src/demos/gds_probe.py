@@ -1,15 +1,12 @@
-"""Gds-probe demo (``--demo gds-probe``).
+"""GDS property-projection demo (``--demo gds-probe``).
 
-Isolate the edge case where Cypher projections reject certain relationship property
-values. The working fast-gds projection maps only labels and
-``relationshipType``; it never projects ``amount`` or
-``transfer_timestamp`` as graph properties. A GDS in-memory graph only accepts numeric
-property types (Long / Double / numeric arrays), so this probe sweeps a series of
-projections that add node and relationship properties one at a time, on a thin window
-(so the 60s read timeout is out of the picture), to find which property configs the
-projection rejects and how.
+GDS accepts numeric graph properties, so the sweep projects the numeric amount and
+converts transfer timestamps to epoch milliseconds. It inspects string properties but
+skips their projection because a string identifier has no useful numeric equivalent.
 
-Each scenario provisions its own session, so the sweep is slow; keep the window thin.
+Each projection scenario provisions its own session, so the sweep takes a few minutes.
+The default 7-day window works (roughly 35-45s per scenario); ``--since-hours`` only
+narrows the window.
 """
 
 from __future__ import annotations
@@ -19,10 +16,10 @@ import datetime as dt
 from dataclasses import dataclass
 
 from neo4j import Driver, GraphDatabase
-from neo4j.time import Date, DateTime, Time, Duration
+from neo4j.time import Date, DateTime, Duration, Time
 
 from connection import load_connection
-from demos.gds_common import DROP_GRAPH, override_bolt_read_timeout, run_statement
+from demos.gds_common import DROP_GRAPH, run_statement
 from helpers import data_max_dates
 
 COUNT_WINDOW = """
@@ -42,11 +39,12 @@ LIMIT 1
 """
 
 # Build the projection around a data-config body assembled per scenario. The body is a
-# Cypher map literal whose expressions reference src / dst / t; it is an internal string,
-# not user input.
+# Cypher map literal whose expressions reference src / dst / t (and any variable the
+# scenario's WITH clause adds); both are internal strings, not user input.
 PROJECT_TEMPLATE = """
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
 WHERE t.transfer_timestamp >= $since
+{with_clause}
 RETURN gds.graph.project(
   $graph,
   src,
@@ -66,6 +64,16 @@ ORDER BY score DESC
 LIMIT 5
 """
 
+# Epoch milliseconds for the timestamp scenarios. `.epochMillis` on the relationship
+# property returns the right values but raises 01N52 (unknown property key
+# `epochMillis`). toInteger() on the timestamp pushes down to SQL as epoch seconds with
+# no warning, but only as a plain column: inside the config map it is evaluated
+# engine-side and rejected (22N38), so it is bound in a WITH first. Every
+# account_links timestamp is a whole second, so `* 1000` matches epochMillis exactly.
+TIMESTAMP_MS_WITH = (
+    "WITH src, dst, t, toInteger(t.transfer_timestamp) * 1000 AS transfer_timestamp_ms"
+)
+
 # The label/type-only base every scenario starts from (the known-good fast-gds shape).
 BASE_CONFIG = (
     "sourceNodeLabels: labels(src), "
@@ -80,8 +88,10 @@ class Scenario:
 
     key: str
     description: str
-    data_config: str
+    data_config: str | None
     weight_prop: str | None = None  # if set, run a weighted PageRank after projecting
+    skip_reason: str | None = None
+    with_clause: str = ""  # optional WITH between the WHERE and the projection
 
 
 def _type_name(value: object) -> str:
@@ -110,26 +120,33 @@ def _pick_props(node_props: dict[str, object]) -> tuple[str | None, str | None]:
     )
     non_numeric = next(
         (k for k, v in node_props.items()
-         if isinstance(v, str) or isinstance(v, (Date, DateTime, Time, Duration))),
+         if isinstance(v, (str, Date, DateTime, Time, Duration))),
         None,
     )
     return numeric, non_numeric
 
 
 def _build_scenarios(node_num: str | None, node_str: str | None) -> list[Scenario]:
-    """Assemble the property sweep, adapting node-property scenarios to the schema."""
+    """Assemble supported projections and identify unsupported string properties."""
     scenarios = [
-        Scenario("A_control", "labels + relationshipType only (the working fast-gds shape)",
+        Scenario("A_control",
+                 "labels + relationshipType only (the working fast-gds shape)",
                  BASE_CONFIG),
         Scenario("B_rel_amount", "relationshipProperties { amount } (numeric)",
                  BASE_CONFIG + ", relationshipProperties: { amount: t.amount }",
                  weight_prop="amount"),
         Scenario("C_rel_timestamp",
-                 "relationshipProperties { transfer_timestamp } (temporal, expected to fail)",
-                 BASE_CONFIG + ", relationshipProperties: { ts: t.transfer_timestamp }"),
-        Scenario("D_rel_both", "relationshipProperties { amount, transfer_timestamp }",
+                 "relationshipProperties { transfer_timestamp_ms } "
+                 "(numeric epoch milliseconds)",
+                 BASE_CONFIG + ", relationshipProperties: "
+                 "{ transfer_timestamp_ms: transfer_timestamp_ms }",
+                 with_clause=TIMESTAMP_MS_WITH),
+        Scenario("D_rel_both",
+                 "relationshipProperties { amount, transfer_timestamp_ms }",
                  BASE_CONFIG
-                 + ", relationshipProperties: { amount: t.amount, ts: t.transfer_timestamp }"),
+                 + ", relationshipProperties: "
+                 "{ amount: t.amount, transfer_timestamp_ms: transfer_timestamp_ms }",
+                 weight_prop="amount", with_clause=TIMESTAMP_MS_WITH),
     ]
     if node_num is not None:
         scenarios.append(Scenario(
@@ -142,27 +159,16 @@ def _build_scenarios(node_num: str | None, node_str: str | None) -> list[Scenari
         scenarios.append(Scenario(
             f"F_node_nonnumeric ({node_str})",
             f"sourceNodeProperties / targetNodeProperties {{ {node_str} }} "
-            "(non-numeric, expected to fail)",
-            BASE_CONFIG
-            + f", sourceNodeProperties: {{ {node_str}: src.{node_str} }}"
-            + f", targetNodeProperties: {{ {node_str}: dst.{node_str} }}"))
+            "(non-numeric)",
+            None,
+            skip_reason=(f"{node_str} is non-numeric; keep it outside the GDS "
+                         "projection")))
     return scenarios
 
 
 def run_probe(args: argparse.Namespace) -> None:
-    """Sweep projection property configs on a thin window to isolate the edge-case bug."""
+    """Sweep usable GDS property configs on the recent transfer window."""
     uri, auth = load_connection()
-
-    # Default to clamping (not disabling) the Bolt read timeout so the known-good ~130s
-    # provisioning is not aborted by the 60s client trip, while a genuinely dead
-    # connection still errors. This keeps the sweep measuring *property* failures, not
-    # the timeout. --read-timeout overrides; 0 disables entirely.
-    clamp = args.probe_read_timeout if args.read_timeout is None else args.read_timeout
-    seconds = None if clamp == 0 else clamp
-    override_bolt_read_timeout(seconds)
-    shown = "disabled (no timeout)" if seconds is None else f"{seconds:g}s"
-    print(f"Bolt read timeout clamped to {shown} (server pins 60s; clamped so the sweep "
-          "measures property failures, not the timeout).")
 
     print(f"Connecting to {uri} ...")
     with GraphDatabase.driver(uri, auth=auth) as driver:
@@ -206,7 +212,7 @@ def run_probe(args: argparse.Namespace) -> None:
 
 
 def _introspect(driver: Driver, since: dt.datetime) -> tuple[str | None, str | None]:
-    """Print the sampled relationship/node property types and pick node props to probe."""
+    """Print the sampled relationship/node property types; pick node props to probe."""
     sample = run_statement(driver, "introspect one windowed relationship + endpoint",
                            SAMPLE_ROW, {"since": since})
     if not sample:
@@ -227,11 +233,18 @@ def _introspect(driver: Driver, since: dt.datetime) -> tuple[str | None, str | N
 
 def _run_scenario(driver: Driver, args: argparse.Namespace, since: dt.datetime,
                   scenario: Scenario) -> tuple[str, str, str]:
-    """Drop any stale graph, run one projection scenario, optionally check it, then drop."""
+    """Drop any stale graph, run one projection scenario, optionally check it, drop."""
     print(f"\n{'=' * 78}\nScenario {scenario.key}: {scenario.description}")
-    run_statement(driver, f"drop stale '{args.graph}'", DROP_GRAPH, {"graph": args.graph})
+    if scenario.skip_reason is not None:
+        print(f"  SKIPPED: {scenario.skip_reason}")
+        return (scenario.key, "SKIP", scenario.skip_reason)
 
-    cypher = PROJECT_TEMPLATE.format(data_config=scenario.data_config)
+    run_statement(driver, f"drop stale '{args.graph}'", DROP_GRAPH,
+                  {"graph": args.graph})
+
+    assert scenario.data_config is not None
+    cypher = PROJECT_TEMPLATE.format(data_config=scenario.data_config,
+                                     with_clause=scenario.with_clause)
     projected = run_statement(
         driver, f"project ({scenario.key})", cypher,
         {"graph": args.graph, "memory": args.memory, "since": since})
@@ -253,9 +266,11 @@ def _run_scenario(driver: Driver, args: argparse.Namespace, since: dt.datetime,
             driver, f"weighted PageRank on '{scenario.weight_prop}'",
             PAGERANK_WEIGHTED.format(prop=scenario.weight_prop), {"graph": args.graph})
         if weighted is None:
-            run_statement(driver, f"drop '{args.graph}'", DROP_GRAPH, {"graph": args.graph})
+            run_statement(driver, f"drop '{args.graph}'", DROP_GRAPH,
+                          {"graph": args.graph})
             return (scenario.key, "PARTIAL",
-                    f"{detail}; but weighted PageRank on '{scenario.weight_prop}' failed")
+                    (f"{detail}; but weighted PageRank on '{scenario.weight_prop}' "
+                     "failed"))
         detail += f"; weighted PageRank OK ({len(weighted)} rows)"
 
     run_statement(driver, f"drop '{args.graph}'", DROP_GRAPH, {"graph": args.graph})

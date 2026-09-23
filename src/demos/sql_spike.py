@@ -7,20 +7,20 @@ runs the aggregation SQL that the Virtual Graph pushes down to, directly against
 ``account_links_large``, and reads ``spill_to_disk_bytes`` from the warehouse query
 history to show the warehouse never spills.
 
-The SQL path is the Databricks SDK (the same ``WorkspaceClient`` the timezone demo
-uses): ``statement_execution`` runs the queries and ``query_history`` pulls the
-confirmatory metrics. The SDK ships as the ``history`` extra
-(``uv sync --extra history``); unlike the timezone demo it is required here, since this
-demo has no Bolt fallback.
+The SQL path is the Databricks SDK (``WorkspaceClient``): ``statement_execution`` runs
+the queries and ``query_history`` pulls the confirmatory metrics. The SDK ships as the
+``history`` extra (``uv sync --extra history``) and is required here, since this demo
+has no Bolt fallback.
 
 Flow:
 
-1. Run the C1/C2/C3 aggregation SQL (each wrapped in an outer ``count(*)`` so the
+1. Run the C1/C2/C3 aggregation SQL (each wrapped in an outer aggregate so the
    scan-and-aggregate cost is paid without shipping result rows), recording client
    wall-clock. ``--build`` first rebuilds ``account_links_large`` at each ramp size
    (destructive ``CREATE OR REPLACE``); without it the demo queries the existing table.
-2. Wait out the warehouse query-history lag (11-25 min), polling on an interval and
-   printing a countdown each check, until every statement's row has finalized.
+2. Wait out the warehouse query-history lag (up to a few minutes), polling on an
+   interval and printing a countdown each check, until every statement's row has
+   finalized.
 3. Print the confirmatory metrics and the zero-spill headline.
 
 Connection details (profile, catalog, schema) come from the project ``.env`` via
@@ -57,7 +57,7 @@ class SqlResult:
 
 @dataclass
 class RunRecord:
-    """One submitted C-query: its label, ramp size, and the statement id to correlate."""
+    """One submitted C-query: its label, ramp size, and statement id to correlate."""
 
     label: str
     size: int
@@ -68,11 +68,13 @@ class RunRecord:
 
 @dataclass
 class HistRow:
-    """The confirmatory metrics for one statement, pulled from warehouse query history."""
+    """The confirmatory metrics for one statement, from warehouse query history."""
 
     execution_ms: int | None
     read_rows: int | None
     spill_bytes: int
+    # Served from the result cache: nothing ran, so spill is not measured.
+    from_cache: bool = False
 
 
 def run_sql(client: object, warehouse_id: str, statement: str, *,
@@ -86,7 +88,9 @@ def run_sql(client: object, warehouse_id: str, statement: str, *,
     later from query history.
     """
     from databricks.sdk.service.sql import (
-        ExecuteStatementRequestOnWaitTimeout, StatementState)
+        ExecuteStatementRequestOnWaitTimeout,
+        StatementState,
+    )
 
     t0 = time.perf_counter()
     resp = client.statement_execution.execute_statement(
@@ -130,36 +134,51 @@ gen AS (
     ROUND(rand(3) * 5000 + 1, 2) AS amount,
     TIMESTAMP('2024-01-01 00:00:00')
       + make_interval(0, 0, 0, CAST(rand(4) * 90 AS INT),
-                      CAST(rand(5) * 24 AS INT), CAST(rand(6) * 60 AS INT), 0) AS transfer_timestamp
+                      CAST(rand(5) * 24 AS INT), CAST(rand(6) * 60 AS INT), 0)
+        AS transfer_timestamp
   FROM range(0, {n})
 )
 SELECT g.link_id, s.account_id AS src_account_id, d.account_id AS dst_account_id,
-       g.amount, g.transfer_timestamp, CAST(g.transfer_timestamp AS DATE) AS transfer_date
+       g.amount, g.transfer_timestamp,
+       CAST(g.transfer_timestamp AS DATE) AS transfer_date
 FROM gen g
 JOIN ids s ON s.idx = g.src_idx
 JOIN ids d ON d.idx = g.dst_idx"""
 
 
 def c_queries(table: str) -> list[tuple[str, str]]:
-    """The C1/C2/C3 pushdown-equivalent SQL, each wrapped in an outer ``count(*)``.
+    """The C1/C2/C3 pushdown-equivalent SQL, each wrapped in an outer aggregate.
 
-    The wrapper preserves the full scan-and-aggregate cost (which is what could spill)
-    without shipping the result rows; the count returned is the inner group count.
+    The wrapper avoids shipping the result rows; its first column is the inner group
+    count. The optimizer drops inner aggregates the wrapper never reads, so the C1 and
+    C2 wrappers also sum or max every inner aggregate. That keeps ``sum(amount)``,
+    ``avg(amount)`` and ``max(amount)`` in the plan, and the scan reads ``amount`` as
+    well as ``src_account_id``. C3 orders by ``pair_outflow``, so its ``sum(amount)``
+    survives with a plain ``count(*)`` wrapper.
+
+    The wrapper also selects ``current_timestamp()`` to bypass the warehouse result
+    cache. The cache matches on the normalized plan, so a re-run is served from cache
+    (``read_rows`` 0, spill 0 because nothing ran) even with a new comment or alias, and
+    the Statement Execution API runs each statement in its own session, so a separate
+    ``SET use_cached_result = false`` does not carry over. A non-deterministic
+    expression opts the statement out of the cache without touching the aggregation.
     """
-    c1 = f"""SELECT count(*) FROM (
+    c1 = f"""SELECT count(*), sum(transfers), sum(outflow), avg(avg_amount),
+       max(max_amount), current_timestamp() AS run_at FROM (
   SELECT src_account_id AS account_id,
          count(*) AS transfers, sum(amount) AS outflow,
          avg(amount) AS avg_amount, max(amount) AS max_amount
   FROM {table}
   GROUP BY src_account_id
 )"""
-    c2 = f"""SELECT count(*) FROM (
+    c2 = f"""SELECT count(*), sum(transfers), sum(outflow),
+       current_timestamp() AS run_at FROM (
   SELECT src_account_id AS account_id, count(*) AS transfers, sum(amount) AS outflow
   FROM {table}
   WHERE transfer_timestamp >= TIMESTAMP('2024-03-23T23:58:00Z')
   GROUP BY src_account_id
 )"""
-    c3 = f"""SELECT count(*) FROM (
+    c3 = f"""SELECT count(*), current_timestamp() AS run_at FROM (
   SELECT src_account_id AS sender, dst_account_id AS recipient,
          count(*) AS pair_transfers, sum(amount) AS pair_outflow
   FROM {table}
@@ -177,8 +196,9 @@ def tagged(label: str, size: int, sql: str) -> str:
     return f"/* {TAG} | {label} | size={size} */\n{sql}"
 
 
-def run_c_queries(client: object, warehouse: str, table: str, size: int) -> list[RunRecord]:
-    """Run C1/C2/C3 against ``table`` at the given ramp ``size``; return their records."""
+def run_c_queries(client: object, warehouse: str, table: str,
+                  size: int) -> list[RunRecord]:
+    """Run C1/C2/C3 against ``table`` at ramp ``size``; return their records."""
     records: list[RunRecord] = []
     for label, sql in c_queries(table):
         try:
@@ -187,13 +207,15 @@ def run_c_queries(client: object, warehouse: str, table: str, size: int) -> list
             print(f"    {label}: ERROR {exc}")
             continue
         inner = res.rows[0][0] if res.rows else "?"
-        print(f"    {label}: OK {res.wall_clock_s:.1f}s client; inner group count {inner}")
-        records.append(RunRecord(label, size, res.statement_id, res.wall_clock_s, inner))
+        print(f"    {label}: OK {res.wall_clock_s:.1f}s client; "
+              f"inner group count {inner}")
+        records.append(
+            RunRecord(label, size, res.statement_id, res.wall_clock_s, inner))
     return records
 
 
 def table_row_count(client: object, warehouse: str, table: str) -> int:
-    """Current row count of ``account_links_large`` (read-only mode reports the size)."""
+    """Current row count of ``account_links_large`` (read-only mode reports it)."""
     res = run_sql(client, warehouse, f"SELECT count(*) FROM {table}")
     return int(res.rows[0][0])
 
@@ -213,7 +235,8 @@ def pull_history(client: object, warehouse: str, start_ms: int, end_ms: int,
         filter_by=QueryFilter(
             warehouse_ids=[warehouse],
             statement_ids=list(want_ids),
-            query_start_time_range=TimeRange(start_time_ms=start_ms, end_time_ms=end_ms),
+            query_start_time_range=TimeRange(start_time_ms=start_ms,
+                                             end_time_ms=end_ms),
         ),
         include_metrics=True,
     )
@@ -226,6 +249,7 @@ def pull_history(client: object, warehouse: str, start_ms: int, end_ms: int,
             execution_ms=metrics.execution_time_ms if metrics else None,
             read_rows=metrics.rows_read_count if metrics else None,
             spill_bytes=(metrics.spill_to_disk_bytes or 0) if metrics else 0,
+            from_cache=bool(metrics.result_from_cache) if metrics else False,
         )
     return found
 
@@ -241,14 +265,22 @@ def await_history(client: object, warehouse: str, start_ms: int, want_ids: set[s
                   max_wait: float) -> dict[str, HistRow]:
     """Poll query history until every statement has finalized, with a countdown.
 
-    Warehouse query history lags 11-25 min, so the metrics are not readable right after
-    the queries run. Each check prints elapsed time, how many statements have landed, and
-    a countdown toward the estimated lag; polling continues past the estimate until all
-    rows arrive or ``max_wait`` is hit.
+    Warehouse query history can lag by up to a few minutes, so the metrics may not be
+    readable right after the queries run. Each check prints elapsed time, how many
+    statements have landed, and a countdown toward the estimated lag; polling
+    continues past the estimate until all rows arrive or ``max_wait`` is hit.
+
+    A failed pull is reported and polling continues. The SDK raises an API error as a
+    ``DatabricksError`` subclass, a network failure as a ``requests`` exception, and
+    ``TimeoutError`` once its own transient-error retries run out.
     """
-    print(f"\n  Query history lags ~11-25 min; polling every {poll_interval / 60:g} min "
-          f"until all {len(want_ids)} statements land "
-          f"(est. lag ~{lag_estimate / 60:g} min, giving up after {max_wait / 60:g} min).")
+    from databricks.sdk.errors import DatabricksError
+    from requests.exceptions import RequestException
+
+    print(f"\n  Query history can lag up to a few minutes; polling every "
+          f"{poll_interval / 60:g} min until all {len(want_ids)} statements land "
+          f"(est. lag ~{lag_estimate / 60:g} min, "
+          f"giving up after {max_wait / 60:g} min).")
     t0 = time.perf_counter()
     check = 0
     while True:
@@ -256,8 +288,9 @@ def await_history(client: object, warehouse: str, start_ms: int, want_ids: set[s
         end_ms = int(time.time() * 1000) + 2_000
         try:
             found = pull_history(client, warehouse, start_ms, end_ms, want_ids)
-        except Exception as exc:  # noqa: BLE001 - SDK raises a broad set; keep polling
-            print(f"  [check {check}] history pull failed ({type(exc).__name__}: {exc})")
+        except (DatabricksError, RequestException, TimeoutError) as exc:
+            print(f"  [check {check}] history pull failed "
+                  f"({type(exc).__name__}: {exc})")
             found = {}
         landed = want_ids & set(found)
         elapsed = time.perf_counter() - t0
@@ -267,13 +300,15 @@ def await_history(client: object, warehouse: str, start_ms: int, want_ids: set[s
             return found
         if elapsed >= max_wait:
             print(f"  [check {check}] giving up after {_mmss(elapsed)}: "
-                  f"{len(landed)}/{len(want_ids)} landed (lag exceeded --max-wait-minutes).")
+                  f"{len(landed)}/{len(want_ids)} landed "
+                  "(lag exceeded --max-wait-minutes).")
             return found
         remaining = lag_estimate - elapsed
         eta = (f"~{_mmss(remaining)} to est. lag" if remaining > 0
                else f"est. lag passed by {_mmss(-remaining)}")
         print(f"  [check {check}] {len(landed)}/{len(want_ids)} landed | "
-              f"elapsed {_mmss(elapsed)} | {eta} | next check in {poll_interval / 60:g} min")
+              f"elapsed {_mmss(elapsed)} | {eta} | "
+              f"next check in {poll_interval / 60:g} min")
         time.sleep(min(poll_interval, max_wait - elapsed))
 
 
@@ -284,15 +319,22 @@ def print_spill_report(records: list[RunRecord], found: dict[str, HistRow]) -> N
     print("=" * 78)
     print(f"  {'label':<28}{'size':>14}{'exec_ms':>10}{'read_rows':>16}"
           f"{'groups':>9}{'spill_bytes':>14}")
-    print(f"  {'-' * 28}{'-' * 14:>14}{'-' * 10:>10}{'-' * 16:>16}{'-' * 9:>9}{'-' * 14:>14}")
+    print(f"  {'-' * 28}{'-' * 14:>14}{'-' * 10:>10}{'-' * 16:>16}"
+          f"{'-' * 9:>9}{'-' * 14:>14}")
     total_spill = 0
     pending = 0
+    cached = 0
     for rec in records:
         hist = found.get(rec.statement_id)
         if hist is None:
             pending += 1
             print(f"  {rec.label:<28}{rec.size:>14,}{'(pending)':>10}"
                   f"{'':>16}{rec.inner_rows:>9}{'':>14}")
+            continue
+        if hist.from_cache:
+            cached += 1
+            print(f"  {rec.label:<28}{rec.size:>14,}{'(cached)':>10}"
+                  f"{'':>16}{rec.inner_rows:>9}{'not measured':>14}")
             continue
         total_spill += hist.spill_bytes
         exec_ms = f"{hist.execution_ms:,}" if hist.execution_ms is not None else "?"
@@ -301,8 +343,12 @@ def print_spill_report(records: list[RunRecord], found: dict[str, HistRow]) -> N
               f"{rec.inner_rows:>9}{hist.spill_bytes:>14,}")
     print("=" * 78)
     if pending:
-        print(f"  {pending} statement(s) still pending in history; rerun later to confirm.")
-    if total_spill == 0 and pending == 0:
+        print(f"  {pending} statement(s) still pending in history; "
+              "rerun later to confirm.")
+    if cached:
+        print(f"  {cached} statement(s) were served from the result cache: cached, not "
+              "measured. Their spill says nothing about the aggregation.")
+    if total_spill == 0 and pending == 0 and cached == 0:
         sizes = sorted({rec.size for rec in records})
         span = (f"{sizes[0]:,} to {sizes[-1]:,} rows" if len(sizes) > 1
                 else f"{sizes[0]:,} rows")
@@ -329,7 +375,7 @@ def run_spike(args: argparse.Namespace) -> None:
     accounts = f"`{cfg.catalog}`.`{cfg.schema}`.`accounts`"
 
     try:
-        client = WorkspaceClient(profile=profile) if profile else WorkspaceClient()
+        client = WorkspaceClient(profile=profile)
     except (ValueError, OSError) as exc:
         print(f"Could not build a Databricks client ({exc}). Check the "
               "DATABRICKS_CONFIG_PROFILE in .env or pass --profile.")
@@ -373,8 +419,9 @@ def run_spike(args: argparse.Namespace) -> None:
         return
 
     if args.skip_history:
-        print(f"\n--skip-history: ran {len(records)} statement(s) but not waiting for the "
-              "~11-25 min history lag. Spill not confirmed; rerun without --skip-history.")
+        print(f"\n--skip-history: ran {len(records)} statement(s) but not waiting for "
+              "the history lag (up to a few minutes). Spill not confirmed; rerun "
+              "without --skip-history.")
         return
 
     want_ids = {rec.statement_id for rec in records}

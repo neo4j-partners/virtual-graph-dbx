@@ -17,18 +17,21 @@ from queries import BASIC_QUERIES, BasicQuery
 
 
 def pick_anchors(driver: Driver) -> tuple[object, object]:
-    """Pick a well-connected anchor account and a merchant for the basic graph queries.
+    """Pick an anchor account and a merchant for the basic graph queries.
 
-    The anchored traversals need a node to start from. Any account with at least one
-    transfer makes a usable ego network; the chosen ids are printed so the same
-    query can be pasted into the Aura Workspace.
+    The anchored traversals need a node to start from. The anchor is simply the first
+    account the server returns that has an outgoing transfer (any such account makes
+    a usable ego network), and the merchant is the first merchant returned. The chosen
+    ids are printed so the same query can be pasted into the Aura Workspace.
     """
     rec, _, _ = driver.execute_query(
         "MATCH (a:Account)-[:TRANSFERRED_TO]->(:Account) "
         "RETURN a.account_id AS id LIMIT 1"
     )
     account_id = rec[0]["id"]
-    rec, _, _ = driver.execute_query("MATCH (m:Merchant) RETURN m.merchant_id AS id LIMIT 1")
+    rec, _, _ = driver.execute_query(
+        "MATCH (m:Merchant) RETURN m.merchant_id AS id LIMIT 1"
+    )
     merchant_id = rec[0]["id"]
     return account_id, merchant_id
 
@@ -46,7 +49,8 @@ def run_basic_query(driver: Driver, query: BasicQuery, max_rows: int, timeout: f
     try:
         rows = run_cypher(driver, query.cypher, params, timeout)
     except Neo4jError as exc:
-        print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {exc.code}\n  {exc.message}")
+        print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {exc.code}\n"
+              f"  {exc.message}")
         return
     except DriverError as exc:
         print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {driver_error(exc)}")

@@ -9,14 +9,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Used only by `--demo timezone` to pull warehouse query history and count the
-# current_timezone() round trips. The core demos need only neo4j + python-dotenv.
+# Used only by `--demo 100m` to run SQL on the warehouse and read query history for
+# spill metrics. The core demos need only neo4j + python-dotenv.
 history = ["databricks-sdk>=0.30"]
 
 [project.scripts]
 vg-demo = "cli:main"
 vg-probe = "probe:main"
-vg-heavy = "heavy_run:main"
 vg-viz = "viz_check:main"
 
 [build-system]

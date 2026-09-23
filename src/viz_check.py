@@ -42,9 +42,9 @@ def main() -> None:
             "find collection account",
             "MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account) "
             "WHERE t.transfer_timestamp >= datetime($since) "
-            "WITH dst.account_id AS recipient, src.account_id AS sender, count(t) AS legs "
-            "WITH recipient, count(*) AS senders "
-            "RETURN recipient, senders ORDER BY senders DESC LIMIT 5",
+            "WITH dst.account_id AS recipient, "
+            "count(DISTINCT src.account_id) AS senders "
+            "RETURN recipient, senders ORDER BY senders DESC, recipient ASC LIMIT 5",
             since=CUTOFF,
         )
         coll_id = recs[0]["recipient"]
@@ -56,47 +56,61 @@ def main() -> None:
             "find spray account",
             "MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account) "
             "WHERE t.transfer_timestamp >= datetime($since) "
-            "WITH src.account_id AS sender, dst.account_id AS recipient, count(t) AS legs "
-            "WITH sender, count(*) AS recipients "
-            "RETURN sender, recipients ORDER BY recipients DESC LIMIT 5",
+            "WITH src.account_id AS sender, "
+            "count(DISTINCT dst.account_id) AS recipients "
+            "RETURN sender, recipients ORDER BY recipients DESC, sender ASC LIMIT 5",
             since=CUTOFF,
         )
         spray_id = recs[0]["sender"]
-        print(f"    -> account {spray_id} with {recs[0]['recipients']} distinct recipients")
+        print(f"    -> account {spray_id} with {recs[0]['recipients']} "
+              "distinct recipients")
 
-        # Anchor 3: highest-volume reciprocal round-trip pair.
+        # Anchor 3: highest-volume reciprocal round-trip pair. Same form as Query 3: the
+        # pattern binds one row per (f, g) combination, so each direction's sum is
+        # divided by the other direction's leg count.
         recs = timed(
             driver,
             "find round-trip pair",
             "MATCH (a:Account)-[f:TRANSFERRED_TO]->(b:Account)-[g:TRANSFERRED_TO]->(a) "
             "WHERE a.account_id < b.account_id "
-            "RETURN a.account_id AS a_id, b.account_id AS b_id, "
-            "round(sum(f.amount + g.amount), 2) AS vol, count(*) AS legs "
-            "ORDER BY vol DESC LIMIT 5",
+            "WITH a.account_id AS a_id, b.account_id AS b_id, "
+            "count(DISTINCT f) AS n_ab, count(DISTINCT g) AS n_ba, "
+            "sum(f.amount) AS sf, sum(g.amount) AS sg "
+            "RETURN a_id, b_id, round(sf / n_ba + sg / n_ab, 2) AS vol, "
+            "n_ab + n_ba AS legs "
+            "ORDER BY vol DESC, a_id ASC, b_id ASC LIMIT 5",
         )
         a_id, b_id = recs[0]["a_id"], recs[0]["b_id"]
         print(f"    -> pair {a_id} <-> {b_id}, round-trip volume {recs[0]['vol']}")
 
         print("--- visualizations ---")
 
+        # The two star pictures use the same 7-day window as the finders (and as
+        # Queries 5 and 6), so they draw the transfers that flagged the anchor.
         timed(
             driver,
             f"VIZ fan-in star @ {coll_id}",
             "MATCH (sender:Account)-[t:TRANSFERRED_TO]->(a:Account {account_id: $id}) "
+            "WHERE t.transfer_timestamp >= datetime($since) "
             "RETURN sender, t, a LIMIT 50",
             id=coll_id,
+            since=CUTOFF,
         )
         timed(
             driver,
             f"VIZ fan-out star @ {spray_id}",
-            "MATCH (a:Account {account_id: $id})-[t:TRANSFERRED_TO]->(recipient:Account) "
+            "MATCH (a:Account {account_id: $id})"
+            "-[t:TRANSFERRED_TO]->(recipient:Account) "
+            "WHERE t.transfer_timestamp >= datetime($since) "
             "RETURN a, t, recipient LIMIT 50",
             id=spray_id,
+            since=CUTOFF,
         )
         timed(
             driver,
             f"VIZ round-trip @ {a_id} <-> {b_id}",
-            "MATCH (a:Account {account_id: $a})-[t:TRANSFERRED_TO]-(b:Account {account_id: $b}) "
+            "MATCH (a:Account {account_id: $a})"
+            "-[t:TRANSFERRED_TO]-(b:Account {account_id: $b}) "
             "RETURN a, t, b",
             a=a_id,
             b=b_id,

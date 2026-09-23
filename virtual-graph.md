@@ -1,8 +1,10 @@
-# Virtual Graph for Finance Genie
+# Virtual Graph Setup for Finance Genie
 
 Neo4j Virtual Graph lets you query Databricks tables as a property graph in Aura without copying the data into Neo4j first. This walkthrough sets up a Virtual Graph over the Finance Genie Silver tables, so you can explore accounts and transfers with Cypher while the data stays in Unity Catalog.
 
-> Virtual Graph is in preview. The official docs advise against using sensitive or production data with it during the preview.
+> Virtual Graph is in public preview. The official docs advise against using sensitive or production data with it during the preview. It is available to AuraDB Professional and Business Critical customers. Billing started on 2026-09-01, and instances use Aura Credits based on their memory size.
+>
+> Start with a small test dataset to get a feel for the warehouse traffic Virtual Graph generates. The docs warn that large datasets combined with computation-heavy queries might incur unexpected costs.
 
 ## 1. Create the Silver tables
 
@@ -22,6 +24,8 @@ Aura connects to Databricks over a SQL warehouse using a personal access token. 
 4. In the **Generate new token** menu, enter a name and a lifetime in days, and select `sql` as the API scope.
 5. Select **Generate** and copy the token.
 
+Virtual Graph needs only read-only access to the data source. The official docs say to limit tokens and other authentication to read-only access. Aura runs every generated SQL query as the token's principal, not as the Neo4j user, so Unity Catalog permissions and row filters apply. Grant that principal `USE CATALOG`, `USE SCHEMA`, and `SELECT` on the Finance Genie schema, plus `CAN USE` on the SQL warehouse. Consider a dedicated service principal rather than a personal token. Virtual Graph checks that every mapped table and column is readable at startup and fails if the principal cannot access one.
+
 ### Look up the server information
 
 To find your **Server hostname** and **HTTP Path**:
@@ -36,7 +40,7 @@ To find your catalog and schema:
 2. Select your catalog.
 3. The **Overview** tab lists the available schemas.
 
-For Finance Genie, the catalog and schema are the ones the setup notebook created (the `CATALOG` and `SCHEMA` set in its configuration cell).
+For Finance Genie, the catalog and schema are the ones the setup notebook created. The notebook sets them as `CATALOG` and `SCHEMA` in its configuration cell.
 
 ## 3. Create the Virtual Graph in Aura
 
@@ -74,6 +78,8 @@ Scroll down to see the remaining two tables, `merchants` and `transactions`. All
 
 Under **Select graph model**, choose **Create new graph model**. You populate this empty model in the next step.
 
+The model editor offers three ways to start: **Define manually**, **Generate from schema**, and **Generate with AI**. This walkthrough uses **Generate from schema**, which enforces unique node labels and relationship types. The docs note that a model generated with AI cannot guarantee that uniqueness, so check any AI-generated model before saving it.
+
 ## 5. Define your schema
 
 **Generate from schema** turns every discovered table into a node, including the `transactions` and `account_links` join tables. The Finance Genie graph needs those two tables modeled as relationships instead, and it leaves `account_labels` out of the graph entirely. The label is the fraud ground truth, so keeping it out of the graph preserves it as a held-out evaluation target rather than a feature.
@@ -85,13 +91,16 @@ The target model is two node types and two relationship types:
 - `TRANSACTED_WITH` relationships (`:Account` → `:Merchant`) from the `transactions` table
 - `TRANSFERRED_TO` relationships (`:Account` → `:Account`) from the `account_links` table
 
+The names follow Neo4j conventions. Node labels are singular PascalCase, such as `Account`. Relationship types are UPPER_SNAKE_CASE, such as `TRANSFERRED_TO`. The Databricks tables keep their plural SQL names, such as `accounts`. The model maps one to the other. Every query in this project uses `:Account` and `:Merchant`, so they fail against a model that still has the generated `:accounts` / `:merchants` labels.
+
 Build that model with the following steps.
 
 1. Remove `account_labels` from the data source so Aura does not model it.
 2. Select **Generate from schema**. Aura infers nodes and relationships from the remaining table schema and foreign keys.
 3. Remove every relationship Aura generated. You will recreate the two you need by hand so the node ID mappings are explicit.
-4. Remove the `transactions` and `account_links` nodes. These are edge tables and become relationships, not nodes. Keep the `accounts` and `merchants` nodes, renaming their labels to `Account` and `Merchant` to match the target model.
-5. Create the `TRANSACTED_WITH` relationship, as shown below:
+4. Remove the `transactions` and `account_links` nodes. These are edge tables and become relationships, not nodes.
+5. Rename the two remaining node labels. **Generate from schema** labels each node after its table, so the nodes arrive as `accounts` and `merchants`. Change the label of `accounts` to `Account` and the label of `merchants` to `Merchant`. Leave the backing tables unchanged.
+6. Create the `TRANSACTED_WITH` relationship, as shown below:
 
    - Set the **Relationship type** to `TRANSACTED_WITH`.
    - Under **Properties**, map from the `transactions` table:
@@ -109,7 +118,7 @@ Build that model with the following steps.
 
    ![Create the TRANSACTED_WITH relationship](./docs/images/load-vg-step-1.png)
 
-6. Create the `TRANSFERRED_TO` relationship, as shown below. Both ends map to the `Account` node; the source and destination differ only by which column supplies the ID:
+7. Create the `TRANSFERRED_TO` relationship, as shown below. Both ends map to the `Account` node; the source and destination differ only by which column supplies the ID:
 
    - Set the **Relationship type** to `TRANSFERRED_TO`.
    - Under **Properties**, map from the `account_links` table:
@@ -126,7 +135,7 @@ Build that model with the following steps.
 
    ![Create the TRANSFERRED_TO relationship](./docs/images/load-vg-step-2.png)
 
-7. Select **Create Virtual Graph** to save the model.
+8. Select **Create Virtual Graph** to save the model, and download the credentials file when prompted. The instance password cannot be changed later and is not recoverable. If you lose it, you must delete and recreate the Virtual Graph.
 
 ## Indexes for the model
 
@@ -150,9 +159,9 @@ ordered by how many queries each one serves:
 
 | Index | Type | Backs |
 |-------|------|-------|
-| `TRANSFERRED_TO.transfer_timestamp` | range | The GDS session window (`WHERE t.transfer_timestamp >= $since`), fan-in (query 5), fan-out (query 6), and the collection / spray finder queries. Highest coverage. |
+| `TRANSFERRED_TO.transfer_timestamp` | range | The GDS session window (`WHERE t.transfer_timestamp >= $since`), Collection accounts (query 5), Spray accounts (query 6), and the collection / spray finder queries. Highest coverage. |
 | `TRANSFERRED_TO.amount` | range | Structuring (query 1), the selective `>= 9000 AND < 10000` filter. |
-| `Account.opened_date` | range | Busy brand-new accounts (query 2). |
+| `Account.opened_date` | range | New accounts moving large sums (query 2). |
 | `Account.balance` | range | Velocity ratio (query 4). |
 | `TRANSACTED_WITH.txn_timestamp` | range | Shared-merchant burst and any merchant time-window query. |
 
@@ -169,15 +178,15 @@ Skip these, with the reason:
 - `account_type`, `region`, and merchant `category` are `GROUP BY` keys, not selective
   range filters, and a range index does not help a grouping scan.
 - `txn_hour` and `holder_age` are not filtered selectively by any demo query.
-- `TRANSACTED_WITH.amount` has no range filter in the current fast query set; add it later
+- `TRANSACTED_WITH.amount` has no range filter in the current fraud query set. Add it later
   only if a merchant-amount threshold query joins the set.
 
-One honest caveat: whether a model range index changes a Virtual Graph's execution is
+One caveat applies. Whether a model range index changes a Virtual Graph's execution is
 unverified. Every performance lever in [`best-practices.md`](best-practices.md) is query
-shape, warehouse size, and the connection pool, never model indexes, and the backing Delta
-tables have no B-tree index for a range index to translate into. Treat these additions as
-aligning the model with Neo4j and Aura Import best practice at near-zero cost, not as a
-guaranteed speed-up. The proven levers stay the ones in
+shape, warehouse size, or the connection pool. The backing Delta tables have no B-tree
+index for a range index to translate into. Treat these additions as a near-zero-cost way
+to align the model with Neo4j and Aura Import best practice. They carry no measured
+speed-up. The proven levers stay the ones in
 [`best-practices.md`](best-practices.md): scalar group keys, time windows to keep result
 sets small, warehouse size, and one query at a time. To check the effect of an index,
 prefix a query with `EXPLAIN` and compare the generated SQL and timing before and after
@@ -192,14 +201,14 @@ Select **Query** from the left-side navigation and run Cypher against the Virtua
 To see transfers between accounts:
 
 ```cypher
-MATCH (a:accounts)-[t:TRANSFERRED_TO]->(b:accounts)
+MATCH (a:Account)-[t:TRANSFERRED_TO]->(b:Account)
 RETURN a, t, b LIMIT 100
 ```
 
 To see the Cypher-to-SQL translation, add `EXPLAIN` to the front of the query:
 
 ```cypher
-EXPLAIN MATCH (a:accounts)-[t:TRANSFERRED_TO]->(b:accounts)
+EXPLAIN MATCH (a:Account)-[t:TRANSFERRED_TO]->(b:Account)
 RETURN a, t, b LIMIT 100
 ```
 
@@ -212,7 +221,7 @@ RETURN a, t, b LIMIT 100
 To group accounts into balance tiers and summarize each tier:
 
 ```cypher
-MATCH (a:accounts)
+MATCH (a:Account)
 WITH a,
      CASE WHEN a.balance < 10000 THEN 'low'
           WHEN a.balance < 100000 THEN 'mid'
@@ -228,7 +237,7 @@ ORDER BY accounts DESC
 Add `EXPLAIN` to the front to see its SQL translation:
 
 ```cypher
-EXPLAIN MATCH (a:accounts)
+EXPLAIN MATCH (a:Account)
 WITH a,
      CASE WHEN a.balance < 10000 THEN 'low'
           WHEN a.balance < 100000 THEN 'mid'
@@ -246,7 +255,7 @@ ORDER BY accounts DESC
 To find which merchants pull the most money, and from how many distinct accounts:
 
 ```cypher
-MATCH (a:accounts)-[t:TRANSACTED_WITH]->(m:merchants)
+MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
 RETURN m.merchant_name AS merchant,
        m.category       AS category,
        count(t)         AS txns,
@@ -261,7 +270,7 @@ LIMIT 20
 To roll spend up to the category level, the merchant analogue of the balance-tier query above:
 
 ```cypher
-MATCH (:accounts)-[t:TRANSACTED_WITH]->(m:merchants)
+MATCH (:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
 RETURN m.category AS category,
        count(t)   AS txns,
        round(sum(t.amount), 2) AS total_spend,
@@ -271,10 +280,10 @@ ORDER BY total_spend DESC
 
 ### Off-hours activity per merchant
 
-To surface merchants with unusual late-night volume, filter on `txn_hour` (0–5 AM):
+To surface merchants with unusual late-night volume, filter on `txn_hour < 6`. That window covers midnight to 5 AM.
 
 ```cypher
-MATCH (:accounts)-[t:TRANSACTED_WITH]->(m:merchants)
+MATCH (:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
 WHERE t.txn_hour < 6
 RETURN m.merchant_name AS merchant,
        count(t)        AS offhours_txns,
@@ -288,16 +297,16 @@ LIMIT 20
 To build an ego network around one merchant, anchor on its `merchant_id`:
 
 ```cypher
-MATCH (a:accounts)-[t:TRANSACTED_WITH]->(m:merchants {merchant_id: 42})
+MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant {merchant_id: 42})
 RETURN a, t, m LIMIT 100
 ```
 
 ### Accounts sharing a merchant
 
-To find two accounts that both pay the same merchant, the shared-merchant motif from [`finding-fraud.md`](docs/finding-fraud.md):
+To find two accounts that both pay the same merchant, use this unanchored form of the shared-merchant query in [`basic-graph-examples.md`](basic-graph-examples.md#10-two-hop-accounts-linked-through-a-shared-merchant):
 
 ```cypher
-MATCH (a:accounts)-[:TRANSACTED_WITH]->(m:merchants)<-[:TRANSACTED_WITH]-(b:accounts)
+MATCH (a:Account)-[:TRANSACTED_WITH]->(m:Merchant)<-[:TRANSACTED_WITH]-(b:Account)
 WHERE a.account_id < b.account_id
 RETURN m.merchant_name AS merchant,
        a.account_id AS account_a,
@@ -315,6 +324,9 @@ When the queries return accounts and their transfers, the Finance Genie Virtual 
 - [Virtual Graph data sources](https://neo4j.com/docs/virtual-graph/aura/data-sources/) for other connection options.
 - [Virtual graph models](https://neo4j.com/docs/virtual-graph/aura/models/) for schema fine-tuning and entity type uniqueness.
 - [Cypher coverage](https://neo4j.com/docs/virtual-graph/aura/cypher-coverage/) for the current Cypher limitations.
+- [SQL queries](https://neo4j.com/docs/virtual-graph/aura/sql-queries/) for reading the generated SQL with `EXPLAIN`.
+- [GDS](https://neo4j.com/docs/virtual-graph/aura/gds/) for running graph algorithms through GDS Sessions.
+- [GraphAcademy: Virtual Graph with Databricks](https://graphacademy.neo4j.com/courses/virtual-graph-databricks) for a guided course.
 
 ## When to model transactions as nodes
 
