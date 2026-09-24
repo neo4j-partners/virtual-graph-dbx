@@ -1,17 +1,22 @@
 """Virtual-Graph-compatible Finance Genie fraud-signal queries.
 
 Queries 1-10 are the forms from ``finding-fraud.md`` and all run by default. Each one
-groups by scalar ids where it can, applies its threshold with a ``WHERE`` after the
-aggregating ``WITH`` (the Cypher form of SQL ``HAVING``), and orders and limits
-server-side, so Databricks does the aggregation and returns only the top rows. Query 11
-(layering cycles) is kept for reference but is not run by default: the Virtual Graph
-rejects its quantified path pattern (``42NG1``).
+that aggregates groups by scalar properties and applies its threshold in a second
+``WITH``, so Databricks runs the ``GROUP BY`` and returns one row per group. A node or
+relationship group key, ``count(DISTINCT <relationship>)``, or a threshold ``WHERE`` on
+the aggregating ``WITH`` itself keeps the ``GROUP BY`` out of the SQL, and the raw rows
+come back instead. Thresholds, ``ORDER BY`` and ``LIMIT`` always run in the Neo4j
+engine. Query 9 is the one exception: its ``date()`` group key cannot push down, and the
+pushable epoch-day form is slower. Query 11 (layering cycles) is kept for reference but
+is not run by default. The Virtual Graph rejects its quantified path pattern
+(``42NG1``).
 
 Two adaptations remain:
 
 1. **Relative time windows become a ``$since`` parameter** anchored to the dataset's max
-   timestamp, since temporal arithmetic inside a ``WHERE`` is unsupported (``42NG0``).
-   The per-pair windows in Queries 8 and 10 cannot be a parameter, so they are dropped.
+   timestamp, since ``datetime() - duration(...)`` inside a ``WHERE`` is unsupported
+   (``42NG0``). The per-pair 48h and 24h windows in Queries 8 and 10 are dropped, so
+   their results stay comparable with ``finding-fraud.md``.
 2. **Split + merge** (courier). ``OPTIONAL MATCH`` is rejected (``42NG1``), so two
    independent single-``MATCH`` aggregations are joined client-side with a default of
    zero for the missing side (``enrich_*``), which keeps the zero-merchant accounts the
@@ -27,9 +32,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 Row = dict[str, Any]
+# "transfer" windows a timestamp and yields a datetime. "opened" windows the account
+# opened_date and yields a date.
+SinceSource = Literal["transfer", "opened"]
+# "table" prints rows. "graph" returns entities for Aura visualization.
+QueryKind = Literal["table", "graph"]
 
 
 @dataclass(frozen=True)
@@ -42,8 +52,7 @@ class Query:
     # If set, ``since_param`` (helpers.py) computes ``$since`` = (data max for
     # ``since_source``) - N days.
     since_window_days: int | None = None
-    since_source: str = "transfer"  # "transfer" (timestamp) or "opened" (account date)
-    since_kind: str = "datetime"  # "datetime" or "date"
+    since_source: SinceSource = "transfer"
     # Client-side threshold, only for a column that exists after the enrich merge.
     client_filter: Callable[[Row], bool] | None = None
     # Client-side per-row conversion, applied in place before filtering and printing.
@@ -58,14 +67,13 @@ class Query:
 
 
 def avg_turnaround_to_hours(row: Row) -> None:
-    """Replace Query 10's ``avg_turnaround`` Duration with ``avg_turnaround_hours``.
+    """Replace Query 10's ``avg_turnaround_s`` seconds with ``avg_turnaround_hours``.
 
-    Returning a Duration avoids ``.epochMillis`` on a relationship property, which the
-    server flags as an unknown property key (``01N52``) even though the values are
-    exact.
+    The seconds come from ``toInteger()`` timestamp arithmetic, which pushes down to SQL
+    as epoch seconds. ``duration.inSeconds`` keeps the ``GROUP BY`` out of the SQL, and
+    ``.epochMillis`` on a relationship property raises ``01N52``.
     """
-    d = row.pop("avg_turnaround")
-    seconds = d.days * 86400 + d.seconds + d.nanoseconds / 1e9
+    seconds = row.pop("avg_turnaround_s")
     row["avg_turnaround_hours"] = round(seconds / 3600, 1)
 
 
@@ -89,9 +97,8 @@ LIMIT 50
         title="New accounts moving large sums (new account, high velocity)",
         since_window_days=30,
         since_source="opened",
-        since_kind="date",
         note=(
-            "30-day opened window via $since; scalar group key carries "
+            "30-day opened window via $since. The scalar group key carries "
             "opened_date/holder_age."
         ),
         cypher="""
@@ -109,16 +116,17 @@ LIMIT 50
         number=3,
         title="Round trips between two accounts (reciprocal transfers)",
         note=(
-            "Single MATCH grouped on scalar a_id/b_id; the a<b filter bounds the "
-            "pair (~3-4s). The pattern binds one row per (f, g) combination, so the "
-            "legs are counted with count(DISTINCT ...) and each direction's sum is "
-            "divided by the other direction's leg count to undo the cross-product."
+            "Single MATCH grouped on scalar a_id/b_id. The a<b filter bounds the "
+            "pair (~1s). The pattern binds one row per (f, g) combination, so the "
+            "legs are counted with count(DISTINCT <link_id>) and each direction's sum "
+            "is divided by the other direction's leg count to undo the cross-product. "
+            "count(DISTINCT f) on the relationship itself does not push down."
         ),
         cypher="""
 MATCH (a:Account)-[f:TRANSFERRED_TO]->(b:Account)-[g:TRANSFERRED_TO]->(a)
 WHERE a.account_id < b.account_id
 WITH a.account_id AS a_id, b.account_id AS b_id,
-     count(DISTINCT f) AS n_ab, count(DISTINCT g) AS n_ba,
+     count(DISTINCT f.link_id) AS n_ab, count(DISTINCT g.link_id) AS n_ba,
      sum(f.amount) AS sf, sum(g.amount) AS sg
 RETURN a_id, b_id,
        round(sf / n_ba + sg / n_ab, 2) AS round_trip_volume,
@@ -130,7 +138,7 @@ LIMIT 50
     Query(
         number=4,
         title="Velocity ratio (moves more than it holds)",
-        note="balance>0 in a leading WHERE; scalar group key carries balance.",
+        note="balance>0 in a leading WHERE. The scalar group key carries balance.",
         cypher="""
 MATCH (a:Account)-[t:TRANSFERRED_TO]->(:Account)
 WHERE a.balance > 0
@@ -149,14 +157,15 @@ LIMIT 50
         since_window_days=7,
         since_source="transfer",
         note=(
-            "7-day window via $since. count(DISTINCT sender) and the senders>=5 "
-            "threshold both run server-side."
+            "7-day window via $since. count(DISTINCT sender) pushes down. The "
+            "senders>=5 threshold sits in a second WITH so the GROUP BY still does."
         ),
         cypher="""
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
 WHERE t.transfer_timestamp >= $since
 WITH dst.account_id AS recipient, count(DISTINCT src.account_id) AS senders,
      count(t) AS transfers, round(sum(t.amount), 2) AS inflow
+WITH recipient, senders, transfers, inflow
 WHERE senders >= 5
 RETURN recipient AS account_id, senders, transfers, inflow
 ORDER BY senders DESC, account_id ASC
@@ -169,14 +178,15 @@ LIMIT 50
         since_window_days=7,
         since_source="transfer",
         note=(
-            "7-day window via $since. Mirror of fan-in: count(DISTINCT recipient) and "
-            "the recipients>=5 threshold both run server-side."
+            "7-day window via $since. Mirror of fan-in: count(DISTINCT recipient) "
+            "pushes down. The recipients>=5 threshold sits in a second WITH."
         ),
         cypher="""
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
 WHERE t.transfer_timestamp >= $since
 WITH src.account_id AS sender, count(DISTINCT dst.account_id) AS recipients,
      count(t) AS transfers, round(sum(t.amount), 2) AS outflow
+WITH sender, recipients, transfers, outflow
 WHERE recipients >= 5
 RETURN sender AS account_id, recipients, transfers, outflow
 ORDER BY recipients DESC, account_id ASC
@@ -194,13 +204,14 @@ LIMIT 50
             "Split into two pushdown halves instead of one OPTIONAL MATCH (rejected "
             "with 42NG1): transfer degree is the main aggregation, merchant count is "
             "merged client-side (missing => 0), which keeps the zero-merchant accounts "
-            "the signal targets. transfer_count>=100 filtered server-side; "
-            "merchant_count<20 filtered client-side after the merge. ~15s in total, "
-            "~11s of it in the undirected transfer-degree query."
+            "the signal targets. transfer_count>=100 sits in a second WITH so the "
+            "GROUP BY pushes down. merchant_count<20 is filtered client-side after the "
+            "merge. ~4s in total, most of it reading the 24,999 enrich rows."
         ),
         cypher="""
 MATCH (a:Account)-[tr:TRANSFERRED_TO]-(:Account)
 WITH a.account_id AS account_id, count(tr) AS transfer_count
+WITH account_id, transfer_count
 WHERE transfer_count >= 100
 RETURN account_id, transfer_count
 ORDER BY transfer_count DESC, account_id ASC
@@ -216,12 +227,13 @@ RETURN acct AS account_id, merchant_count
         number=8,
         title="Pass-through mule (local betweenness proxy)",
         note=(
-            "Two-hop join (~4-6s). 48h forward window dropped (temporal arithmetic "
-            "in WHERE unsupported); forward-after-receive ordering and the same-value "
-            "(5%) test are kept. passthroughs counts (in, out) pairs, so one incoming "
-            "transfer can count several times; the WITH groups per incoming transfer "
-            "so forwarded_in and volume count each one once. Aliased mule_id: "
-            "account_id is ambiguous in the pushed-down SQL."
+            "Two-hop join (~1s). 48h forward window dropped to match the doc. The "
+            "forward-after-receive ordering and the same-value (5%) test are kept. "
+            "passthroughs counts (in, out) pairs, so one incoming transfer can count "
+            "several times. The WITH groups per incoming transfer on its unique "
+            "link_id (a scalar key, so the GROUP BY pushes down) so forwarded_in and "
+            "volume count each one once. Aliased mule_id: account_id is ambiguous in "
+            "the pushed-down SQL."
         ),
         cypher="""
 MATCH (a:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)
@@ -229,11 +241,12 @@ MATCH (a:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)
 WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
   AND abs(t_out.amount - t_in.amount) <= 0.05 * t_in.amount
   AND a <> b
-WITH mule.account_id AS mule_id, t_in, count(*) AS outs
+WITH mule.account_id AS mule_id, t_in.link_id AS in_link, t_in.amount AS in_amount,
+     count(*) AS outs
 RETURN mule_id,
-       sum(outs)                  AS passthroughs,
-       count(t_in)                AS forwarded_in,
-       round(sum(t_in.amount), 2) AS volume
+       sum(outs)                 AS passthroughs,
+       count(in_link)            AS forwarded_in,
+       round(sum(in_amount), 2)  AS volume
 ORDER BY passthroughs DESC, mule_id ASC
 LIMIT 50
 """,
@@ -243,8 +256,10 @@ LIMIT 50
         title="Shared-merchant burst (coordinated ring)",
         note=(
             "Groups by the merchant node and day with collect(DISTINCT ...) (~5s). "
+            "The date() key keeps the GROUP BY out of the SQL. An epoch-day key "
+            "pushes down but is slower (~35s), because of the collected arrays. "
             "account_count>=4 and txns<=200 filtered server-side. The txns<=200 cap is "
-            "a safeguard against bulk merchant-days; it never applies to this sample, "
+            "a safeguard against bulk merchant-days. It never applies to this sample, "
             "where the busiest merchant-day has 7 purchases."
         ),
         cypher="""
@@ -263,11 +278,11 @@ LIMIT 50
         number=10,
         title="Rapid-turnover summary per account",
         note=(
-            "Unbounded two-hop join, the slowest query (~210s; fits the 300s default "
-            "timeout). 24h window dropped (temporal arithmetic in WHERE unsupported); "
-            "average turnaround is computed over all forward-after-receive pairs as a "
-            "Duration (duration.inSeconds) and converted to hours client-side. "
-            "rapid_pairs>=50 filtered server-side."
+            "Unbounded two-hop join grouped on scalar mule_id (~1-2s). 24h window "
+            "dropped to match the doc. Average turnaround is computed over all "
+            "forward-after-receive pairs as toInteger() epoch-second differences, "
+            "which push down, and converted to hours client-side. rapid_pairs>=50 "
+            "sits in a second WITH so the GROUP BY pushes down."
         ),
         row_transform=avg_turnaround_to_hours,
         cypher="""
@@ -275,12 +290,13 @@ MATCH (src:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)
       -[t_out:TRANSFERRED_TO]->(dst:Account)
 WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
   AND src <> dst
-WITH mule,
+WITH mule.account_id AS mule_id,
      count(*) AS rapid_pairs,
-     avg(duration.inSeconds(t_in.transfer_timestamp,
-                            t_out.transfer_timestamp)) AS avg_turnaround
+     avg(toInteger(t_out.transfer_timestamp)
+         - toInteger(t_in.transfer_timestamp)) AS avg_turnaround_s
+WITH mule_id, rapid_pairs, avg_turnaround_s
 WHERE rapid_pairs >= 50
-RETURN mule.account_id AS account_id, rapid_pairs, avg_turnaround
+RETURN mule_id AS account_id, rapid_pairs, avg_turnaround_s
 ORDER BY rapid_pairs DESC, account_id ASC
 LIMIT 50
 """,
@@ -322,9 +338,9 @@ LIMIT 50
 #     basic demo prints only the row count and timing and tells you to run it there.
 #
 # The anchored graph queries take ``$account_id`` and ``$merchant_id`` parameters.
-# The basic demo picks an anchor account (the first one with an outgoing transfer)
-# and a merchant at runtime and prints which ids it used, so the same query can be
-# pasted into the Workspace.
+# The basic demo uses account 17813 and merchant 1 as anchors, falling back to the
+# lowest ids if either is missing, and prints which ids it used, so the same query
+# can be pasted into the Workspace.
 
 
 @dataclass(frozen=True)
@@ -332,7 +348,7 @@ class BasicQuery:
     number: int
     title: str
     cypher: str
-    kind: str = "table"  # "table" (print rows) or "graph" (for Aura visualization)
+    kind: QueryKind = "table"
     note: str = ""
 
 
@@ -366,7 +382,7 @@ MATCH (m:Merchant) RETURN count(m) AS merchants
         cypher="""
 MATCH (a:Account)
 RETURN a.account_type AS account_type, count(*) AS accounts
-ORDER BY accounts DESC
+ORDER BY accounts DESC, account_type ASC
 """,
     ),
     BasicQuery(
@@ -376,7 +392,7 @@ ORDER BY accounts DESC
         cypher="""
 MATCH (a:Account)
 RETURN a.region AS region, count(*) AS accounts
-ORDER BY accounts DESC
+ORDER BY accounts DESC, region ASC
 """,
     ),
     BasicQuery(
@@ -420,13 +436,13 @@ LIMIT 25
         title="Ego network: one account and its transfer partners",
         kind="graph",
         note=(
-            "Undirected so it shows money in and out; the 25 most recent transfers "
-            "(~1s)."
+            "Undirected so it shows money in and out. It returns the 25 most recent "
+            "transfers (~1s)."
         ),
         cypher="""
 MATCH (a:Account {account_id: $account_id})-[t:TRANSFERRED_TO]-(b:Account)
 RETURN a, t, b
-ORDER BY t.transfer_timestamp DESC
+ORDER BY t.transfer_timestamp DESC, t.link_id ASC
 LIMIT 25
 """,
     ),
@@ -438,6 +454,7 @@ LIMIT 25
         cypher="""
 MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant {merchant_id: $merchant_id})
 RETURN a, t, m
+ORDER BY a.account_id, t.txn_id
 LIMIT 25
 """,
     ),
@@ -454,6 +471,7 @@ MATCH (a:Account {account_id: $account_id})-[t1:TRANSACTED_WITH]->(m:Merchant)
       <-[t2:TRANSACTED_WITH]-(b:Account)
 WHERE a <> b
 RETURN a, t1, m, t2, b
+ORDER BY m.merchant_id, b.account_id, t1.txn_id, t2.txn_id
 LIMIT 25
 """,
     ),
@@ -467,10 +485,11 @@ LIMIT 25
             "the point."
         ),
         cypher="""
-MATCH p=(a:Account {account_id: $account_id})-[:TRANSFERRED_TO]->(b:Account)
-        -[:TRANSFERRED_TO]->(c:Account)
+MATCH p=(a:Account {account_id: $account_id})-[t1:TRANSFERRED_TO]->(b:Account)
+        -[t2:TRANSFERRED_TO]->(c:Account)
 WHERE c <> a
 RETURN p
+ORDER BY b.account_id, c.account_id, t1.link_id, t2.link_id
 LIMIT 25
 """,
     ),
@@ -482,7 +501,7 @@ LIMIT 25
         title="Count accounts and merchants in one statement (UNION ALL)",
         kind="table",
         note=(
-            "Counting two labels in one chained statement fails with 42NG1 (see B1); "
+            "Counting two labels in one chained statement fails with 42NG1 (see B1). "
             "UNION ALL is the one-statement workaround. It runs as one Cypher "
             "statement but two pushed SQL statements, one count per branch, "
             "concatenated engine-side."
@@ -498,12 +517,13 @@ MATCH (m:Merchant) RETURN 'merchants' AS label, count(m) AS n
         title="Any 25 account-merchant edges (unanchored single-hop, LIMIT)",
         kind="graph",
         note=(
-            "Unanchored, so there is no starting filter; LIMIT 25 still pushes into "
+            "Unanchored, so there is no starting filter. LIMIT 25 still pushes into "
             "the SQL as LIMIT ?, so exactly 25 rows come back (~1s)."
         ),
         cypher="""
 MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
 RETURN a, t, m
+ORDER BY a.account_id, m.merchant_id, t.txn_id
 LIMIT 25
 """,
     ),
@@ -512,13 +532,14 @@ LIMIT 25
         title="Any 25 two-hop transfer chains (unanchored, LIMIT)",
         kind="graph",
         note=(
-            "Unanchored two-hop over TRANSFERRED_TO; the limit still pushes down to "
-            "25 rows (~1s). The pushed SQL also carries Cypher's "
-            "relationship-uniqueness rule."
+            "Unanchored two-hop over TRANSFERRED_TO, returned as paths so the "
+            "relationships draw too. The limit still pushes down to 25 rows (~1s). "
+            "The pushed SQL also carries Cypher's relationship-uniqueness rule."
         ),
         cypher="""
-MATCH (a:Account)-[:TRANSFERRED_TO]->(b:Account)-[:TRANSFERRED_TO]->(c:Account)
-RETURN a, b, c
+MATCH p=(a:Account)-[t1:TRANSFERRED_TO]->(b:Account)-[t2:TRANSFERRED_TO]->(c:Account)
+RETURN p
+ORDER BY a.account_id, b.account_id, c.account_id, t1.link_id, t2.link_id
 LIMIT 25
 """,
     ),
@@ -528,13 +549,14 @@ LIMIT 25
         kind="graph",
         note=(
             "Depth escalation: LIMIT 25 bounds the output, not the join work behind "
-            "it. Exactly 25 rows come back (under 1.5s). An anchor is what makes a "
-            "deep traversal cheap."
+            "it. Exactly 25 paths come back (1 to 2s). No ORDER BY, so they are an "
+            "arbitrary 25: a sort makes the warehouse build every four-hop chain "
+            "before the limit applies. An anchor is what makes a deep traversal cheap."
         ),
         cypher="""
-MATCH (a:Account)-[:TRANSFERRED_TO]->(b:Account)-[:TRANSFERRED_TO]->(c:Account)
+MATCH p=(a:Account)-[:TRANSFERRED_TO]->(b:Account)-[:TRANSFERRED_TO]->(c:Account)
       -[:TRANSFERRED_TO]->(d:Account)-[:TRANSFERRED_TO]->(e:Account)
-RETURN a, b, c, d, e
+RETURN p
 LIMIT 25
 """,
     ),

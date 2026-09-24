@@ -6,7 +6,7 @@ warehouse, so the rules here are about helping that translation push work down t
 Databricks instead of dragging rows back to the graph engine.
 
 The working fraud queries this guide draws on are the demo set in
-[`finding-fraud.md`](docs/finding-fraud.md); the warm-up and visualization queries are in
+[`finding-fraud.md`](docs/finding-fraud.md). The warm-up and visualization queries are in
 [`basic-graph-examples.md`](basic-graph-examples.md). This document is the reference
 for *why* those queries are shaped the way they are, and what to do when a standard
 Cypher query will not run.
@@ -19,10 +19,11 @@ Cypher query will not run.
   reference forms in the appendix show the gap.
 - **The shared query shape.** Filter, group, and apply thresholds in the query, then order
   and limit in Cypher. Row-level filters such as a time window, an amount range, or an
-  account-id anchor push down to Databricks. A `GROUP BY` on a key column pushes down too.
-  A HAVING-style `WHERE` on an aggregate alias runs as part of the query, so thresholds stay
-  in Cypher. `ORDER BY` runs in the graph engine rather than the warehouse, but it is still
-  worth writing. Almost every adaptation in this guide follows from that split.
+  account-id anchor push down to Databricks. A `GROUP BY` pushes down when every group key
+  is a scalar property and the threshold sits in a second `WITH`. Thresholds run in the
+  graph engine over the groups the warehouse returns. So do an `ORDER BY` and `LIMIT` that
+  follow an aggregating `WITH`. On a traversal, the sort and the limit push into the SQL. Almost every
+  adaptation in this guide follows from that split.
 - **Property mapping.** Relationship and node properties exist only if they were mapped
   from a backing table column in the Aura model. An unmapped column leaves the
   relationship in place with zero properties, and any query touching it fails with
@@ -41,56 +42,70 @@ the connection pool. Treat the numbers here as rough and directional.
 
 ## What governs performance
 
-Performance comes down to two cost centers plus the machine everything runs on. A few
-terms used throughout:
+A few terms used throughout:
 
 - **Scalar:** A scalar is a single plain value, such as an `account_id`. A whole node
   object is the opposite.
-- **Node:** A node is a full graph object, such as an `:Account`, that carries all its
-  properties.
-- **Pushdown:** Pushdown lets Databricks do the counting and summing. This is the fast path.
-- **Materialize:** The graph engine materializes a result when it pulls every matching row
-  back to itself first and then counts. This is the slow path.
+- **Pushdown:** Pushdown means the aggregation runs on Databricks as a SQL `GROUP BY`. The
+  warehouse then returns one row per group.
+- **Raw rows:** When the `GROUP BY` does not push down, the warehouse returns one row per
+  matched pattern. The graph engine then does the counting and summing itself.
 - **Cardinality:** Cardinality is how many rows a query touches or returns. High
   cardinality means a lot of rows.
 
-**Cost center 1, where the math happens.** Either Databricks or the graph engine does the
-counting and summing. Databricks is the fast path. The patterns below keep this work on
-Databricks.
+**Cost center 1: rows shipped into the graph engine.** The largest cost is how many rows
+the warehouse returns to the graph engine, plus the engine's work on them. Warehouse
+execution is a small part of the wall time. Uncached pushed aggregations took 150 to 600ms
+of warehouse execution on this data. An earlier form of query 10 got 11,151,853 raw rows
+back from the warehouse result cache in 2ms, then spent 208s in the engine. Its pushed
+form returns 24,319 groups and finishes in about 1s.
 
-**Cost center 2, how much data moves.** Every result row travels back over the wire.
-This bites even when cost center 1 is perfect.
+**Cost center 2: rows returned to the client.** Every result row also travels back over
+the wire to the application. This bites even when the aggregation pushes down. See
+[Pattern 6](#pattern-6-keep-result-sets-small).
 
 **The machine underneath.** Once the query shape is right, the absolute wall-clock time
 also depends on the warehouse size and the connection pool, covered under
 [Performance and the connection pool](#performance-and-the-connection-pool).
 
+**How to check a query.** Look up its statement in the warehouse query history or in
+`system.query.history`. A pushed aggregation has a `GROUP BY` in its SQL text, and its row
+count equals the number of groups. A query that did not push has no `GROUP BY`, and its
+row count equals the number of matches. The `03N97` post-processing notification does not
+tell you either way. It fires on every aggregation with `ORDER BY` or `LIMIT`, pushed or
+not.
+
 The next sections are the patterns. Each one is stated once, with the worked example
-that measured it.
+that measured it. The rules come from the SQL text of each statement in
+`system.query.history`, captured on 2026-09-23.
 
 ### Pattern 1: group by scalar keys
 
-Group by a scalar key such as `a.account_id` rather than by the whole node `a`. On this
-data both forms push the `GROUP BY` down to the warehouse and return in about a second.
-The scalar form is still the better default. It names the output column explicitly. It
-also returns plain values instead of node objects, which keeps each result row small.
+Every group key must be a scalar property such as `a.account_id`. A node such as `a`, a
+relationship such as `t`, or a function such as `date(t.txn_timestamp)` used as a group
+key keeps the `GROUP BY` out of the SQL. The warehouse then returns every matching row,
+and the engine groups them.
+
+The cost of that mistake grows with the number of matches. The structuring query matches
+only 200 transfers. Its node-grouped form, `WITH src, count(t) ...`, returns the same rows
+as the scalar form in about 0.5s, against about 0.35s. Query 10 matches 11,151,853
+transfer pairs. Grouped by the `mule` node, it took 208s. Grouped by `mule.account_id`, it
+pushes 24,319 groups and takes about 1s.
 
 - **Structuring (just-under-threshold transfers).** Grouping by scalar `src.account_id`
-  pushes the `GROUP BY` down to the warehouse. The node-grouped form, `WITH src, count(t)
-  ...`, also pushes down and returned 196 rows in 1.1s.
+  pushes the `GROUP BY` down to the warehouse.
 
   ```cypher
   MATCH (src:Account)-[t:TRANSFERRED_TO]->(:Account)
   WHERE t.amount >= 9000 AND t.amount < 10000
   WITH src.account_id AS account_id, count(t) AS near_threshold, round(sum(t.amount), 2) AS total
   RETURN account_id, near_threshold, total
-  ORDER BY near_threshold DESC
+  ORDER BY near_threshold DESC, account_id ASC
   ```
 
 - **New account, high velocity.** The scalar form groups by `a.account_id` and carries
   `a.opened_date` and `a.holder_age` as extra grouping keys. Those values are constant per
-  account, so they do not split any group. The node-grouped form `WITH a, count(t) ...`
-  returned the same 452 rows in 1.3s.
+  account, so they do not split any group.
 
   ```cypher
   MATCH (a:Account)-[t:TRANSFERRED_TO]->(:Account)
@@ -103,12 +118,28 @@ also returns plain values instead of node objects, which keeps each result row s
 Carry any constant node property you need, such as the balance or the opened date, as an
 additional scalar grouping key. Do not group by the node just to keep that property.
 
+To group per relationship, group on its unique id. Query 8 groups on `t_in.link_id` and
+carries `t_in.amount` as an extra key, instead of grouping on `t_in`. That change took it
+from 210,289 raw rows to 98,474 groups, and from about 3.6s to about 1s.
+
+Query 9 is the one exception in the demo. It groups on `date(t.txn_timestamp)`, which does
+not push down, so it ships all 250,000 purchases and runs in 5 to 9s. An epoch-day key,
+`toInteger(t.txn_timestamp) / 86400`, does push down. It returns 208,127 groups, but it
+takes about 35s. The engine ingests the arrays from `collect(DISTINCT ...)` slowly, so a
+pushed `collect` over many groups can cost more than the raw rows. Time both forms when a
+query collects.
+
 ### Pattern 2: count distinct values on the server
 
-`count(DISTINCT x)` is fast on this data. With a scalar group key, it ran in 1.5s on a
-1-day window and 2.0s on a 7-day window. The fan-in form with `count(DISTINCT src)` grouped
-by the `dst` node ran in 1.8s on the 7-day window. Write the distinct count in Cypher and
+`count(DISTINCT x.prop)` over a scalar property pushes down as a SQL `count(DISTINCT ...)`.
+Queries 5 and 6 use it, and each runs in under 1s. Write the distinct count in Cypher and
 let the server return one row per account.
+
+`count(DISTINCT r)` over a relationship variable runs, but it keeps the `GROUP BY` out of
+the SQL. Count the relationship's unique id instead. Query 3 counts
+`count(DISTINCT f.link_id)` rather than `count(DISTINCT f)`. `link_id` is unique, so the
+counts are equal. The change took query 3 from 56,254 raw rows to 21,052 groups, and from
+about 2.2s to about 0.6s warm.
 
 - **Fan-in by distinct senders.** Group by the recipient and count distinct senders.
 
@@ -138,36 +169,56 @@ pass-through mule query aliases its key as `mule_id` for the same reason. The
 `account_id` column. On the merchant side, alias the group key to another name and rename
 it in `RETURN`.
 
-### Pattern 3: filter aggregates, order, and limit in Cypher
+### Pattern 3: put thresholds in a second `WITH`
 
-Write the threshold, the sort, and the top-N in Cypher. A HAVING-style `WHERE` after an
-aggregating `WITH` filters on the aggregate alias. `ORDER BY` and `LIMIT` then rank and
-trim what is left. A test query of the form `WITH a.account_id AS id, count(t) AS c WHERE
-c > 40` returned rows in 14.6s cold and 5.4s warm. The form runs with or without the
-`CYPHER 25` prefix. See [Cypher coverage](#cypher-coverage).
+Write the threshold, the sort, and the top-N in Cypher. Put the threshold in a second
+`WITH` that repeats the columns, not on the aggregating `WITH` itself. A `WHERE` attached
+to the aggregating `WITH` is the Cypher form of SQL `HAVING`. It runs, but it keeps the
+`GROUP BY` out of the SQL. That held for every aggregate tested: `count(t)`, `count(*)`,
+`sum`, `max` and `count(DISTINCT ...)`. The second `WITH` restores the push and returns
+the same rows.
 
 - **Fan-in by transfer count.** This query uses a scalar group key, `count(t)`, and
-  `sum(t.amount)`. The `transfers >= 5` threshold, the sort, and the top-N all stay in
-  Cypher.
+  `sum(t.amount)` over a 7-day window. With the threshold on the aggregating `WITH`, the
+  warehouse returned 23,198 raw rows, and the query took 0.9s warm and 2.8s cold. With the
+  threshold in a second `WITH`, it returned 9,847 groups and took 0.4s warm and 0.7s cold.
 
   ```cypher
   MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
   WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
   WITH dst.account_id AS recipient, count(t) AS transfers, sum(t.amount) AS inflow
+  WITH recipient, transfers, inflow
   WHERE transfers >= 5
   RETURN recipient AS account_id, transfers, inflow
   ORDER BY transfers DESC, account_id
   LIMIT 50
   ```
 
-`ORDER BY` and `LIMIT` do not reach the warehouse on an aggregation. The captured SQL is
-byte-identical with or without them. The warehouse produces the full group set, and the
-graph engine sorts and trims it afterward as a post-processing step. Add a secondary sort
-key such as `account_id` so rows that tie at the `LIMIT` cutoff come back in a fixed order.
-Every demo fraud query except the courier query does this. At tens of thousands
-of grouped rows that step is cheap. The engine trims before the engine-to-client leg, so a
-top-N sends fewer rows over the wire. Only a filter or an anchor reduces warehouse work. A
-`LIMIT` on an aggregation does not.
+  The two forms return the same accounts in the same order. The unrounded `inflow` sums
+  differ in the twelfth decimal place, because the summation order changes.
+
+- **Courier transfer degree.** Query 7's transfer half moved its `transfer_count >= 100`
+  threshold into a second `WITH`. It went from 600,000 raw rows at about 11s to 25,000
+  groups at under 1s, with the same 1,200 rows.
+
+A threshold on the aggregating `WITH` also pushes when that `WITH` holds an expression over
+an aggregate, such as `round(sum(t.amount), 2)`. Do not rely on it. Dropping that column
+silently stops the push. Every demo query uses the second `WITH`.
+
+The threshold itself never reaches the SQL. The warehouse returns every group, and the
+graph engine applies the `WHERE`. `ORDER BY` and `LIMIT` after an aggregating `WITH` do
+not reach the warehouse either. The captured SQL is byte-identical with or without them. The engine
+sorts and trims the groups afterward as a post-processing step. Add a secondary sort key
+such as `account_id` so rows that tie at the `LIMIT` cutoff come back in a fixed order.
+Every demo fraud query does this. At tens of thousands of grouped rows that step is cheap.
+The engine trims before the engine-to-client leg, so a top-N sends fewer rows over the
+wire. Only a filter or an anchor reduces warehouse work. A `LIMIT` on an aggregation does
+not.
+
+An aggregation in the final `RETURN` behaves differently. Basic query 6 returns
+`count(DISTINCT a)` per merchant with `ORDER BY` and `LIMIT 10`. Its warehouse statement
+produced 10 rows, not the 7,500 merchant groups. The same query with the count in a `WITH`
+produced all 7,500 groups. The warehouse still reads every transaction in both forms.
 
 This is observed behavior, not a documented guarantee. The official docs say ordering and
 limits "only work if they do not require post-processing in Cypher." If a sorted or limited
@@ -193,6 +244,8 @@ removes the `DISTINCT`.
   ```cypher
   MATCH (a:Account)-[tr:TRANSFERRED_TO]-(:Account)
   WITH a.account_id AS account_id, count(tr) AS transfer_count
+  WITH account_id, transfer_count
+  WHERE transfer_count >= 100
   RETURN account_id, transfer_count
   ```
 
@@ -202,10 +255,11 @@ removes the `DISTINCT`.
   RETURN acct AS account_id, merchant_count
   ```
 
-  Each half pushes down. The transfer half keeps its threshold in Cypher as
-  `WHERE transfer_count >= 100` after the `WITH`. The courier query takes about 15s in the
-  demo. Client-side, left-join the two halves on the account. Default `merchant_count` to 0
-  for accounts with no merchant activity, then apply the `merchant_count < 20` check. That
+  Each half pushes down. The transfer half keeps its threshold in a second `WITH`, per
+  [Pattern 3](#pattern-3-put-thresholds-in-a-second-with). The courier query takes about
+  4s in the demo. Most of that is reading the 24,999 rows of the merchant half.
+  Client-side, left-join the two halves on the account. Default `merchant_count` to 0 for
+  accounts with no merchant activity, then apply the `merchant_count < 20` check. That
   check is the only part that runs client-side. It has to follow the join, because
   accounts with zero merchant activity appear only after the default fills in. The
   transfer half also confirms the undirected `-[tr:TRANSFERRED_TO]-` pattern translates
@@ -217,8 +271,8 @@ A `LIMIT` pushes into the SQL on a traversal, anchored or not, at every depth te
 unanchored single-, two-, and four-hop traversal with `LIMIT 25` each produced exactly 25
 rows on the warehouse. A limit-bounded visualization query does not need an anchor to be
 bounded. The `LIMIT` bounds the output, not the join work. The unanchored four-hop query
-returned in 0.6 to 2.4s across runs on this data, but its join work still grows with each hop. An anchor on a
-single node id such as `{account_id: 184}` becomes a selective SQL filter. That filter, not
+returned in 0.6 to 2.4s across runs on this data, but its join work still grows with
+each hop. An anchor on a single node id such as `{account_id: 184}` becomes a selective SQL filter. That filter, not
 the `LIMIT`, is what keeps a deep traversal cheap.
 
 ```cypher
@@ -233,6 +287,24 @@ travels back over the wire. The visualization queries in
 [`finding-fraud.md`](docs/finding-fraud.md) and [`basic-graph-examples.md`](basic-graph-examples.md)
 all follow this rule.
 
+An `ORDER BY` changes the cost of an unanchored deep traversal. The sort pushes into the
+SQL along with the `LIMIT`. To return the top 25 sorted rows, the warehouse must first
+build the whole join. Without a sort, it can stop once it has 25 rows. These are
+warehouse execution times for unanchored path queries with `LIMIT 25`, measured on
+2026-09-23:
+
+| Depth | No `ORDER BY` | With `ORDER BY` |
+|---|---|---|
+| Two hops | about 1s end to end, not timed separately | 0.8s |
+| Three hops | 0.7s | 37 to 38s |
+| Four hops | 1.0s | over 99s |
+
+Depth drives the cost. Sorting on every node instead of only the first barely changes the
+time. A sorted two-hop traversal is cheap. From three hops on, anchor the traversal before
+you sort it, or leave the `LIMIT` unsorted and accept an arbitrary sample. Query 15 in
+[`basic-graph-examples.md`](basic-graph-examples.md#15-any-25-four-hop-transfer-chains)
+stays unsorted for this reason.
+
 ### Pattern 6: keep result sets small
 
 Cost center 2 stands alone: every row travels back over the wire. The all-time fan-out
@@ -241,17 +313,19 @@ pair query returns 222,966 rows even though it pushes down fully. Narrowing it t
 row count. A recent window is also often the cleaner definition of the signal. A burst of
 many recipients in one week is a better smurfing signal than an all-time total.
 
-Multi-hop joins are expensive regardless of grouping. Following two steps in a row, where
-A sends to B and B sends to C, does a lot of matching work no matter how you group it. The
-rapid-turnover query takes about 210s. The pass-through mule query takes about 4 to 6s
-with `LIMIT 50`. Always bound or filter a two-hop pattern.
+A two-hop join can match far more rows than either relationship table holds. Query 10's
+pattern matches 11,151,853 transfer pairs out of 300,000 transfers. When the aggregation
+pushes down, the warehouse does that join and returns only the groups. Query 10 then runs
+in about 1s, and the pass-through mule query in 1 to 2s. When it does not push down,
+every match crosses into the graph engine. On a two-hop join, check the pushdown first.
+Bound or anchor the pattern when the result itself is large.
 
 A two-hop pattern also matches once per combination of edges. The round-trip query binds
 one row for every pair of one transfer each way, so `count(*)` and `sum()` over it count
-each transfer several times. Count each direction with `count(DISTINCT f)` and divide
-each direction's sum by the other direction's count, as query 3 does. The pass-through
-mule query groups by mule and incoming transfer in a first `WITH`, so each incoming
-transfer's dollars count once.
+each transfer several times. Count each direction with `count(DISTINCT f.link_id)` and
+divide each direction's sum by the other direction's count, as query 3 does. The
+pass-through mule query groups by mule and incoming `link_id` in a first `WITH`, so each
+incoming transfer's dollars count once.
 
 ### When plain Cypher is not enough: GDS
 
@@ -270,9 +344,10 @@ pattern and the plain-Cypher-versus-GDS trade-off.
 How to take a standard Cypher query and make it run on the Virtual Graph. Most of these
 follow from the patterns above.
 
-- **Keep the threshold filter in Cypher.** Put a HAVING-style `WHERE` on the aggregate
-  alias after the aggregating `WITH`, then add `ORDER BY` and `LIMIT`. See
-  [Pattern 3](#pattern-3-filter-aggregates-order-and-limit-in-cypher).
+- **Put the threshold in a second `WITH`.** Repeat the aggregate columns in a second
+  `WITH` and attach the `WHERE` there, then add `ORDER BY` and `LIMIT`. A `WHERE` on the
+  aggregating `WITH` itself keeps the `GROUP BY` out of the SQL. See
+  [Pattern 3](#pattern-3-put-thresholds-in-a-second-with).
 - **Replace relative time windows with a parameter.** `datetime() - duration({days: 7})`
   inside `WHERE` is unsupported. Compute the cutoff in the application and pass it as
   `$since`, then use `prop >= $since`. Anchor the window to the dataset's maximum
@@ -281,15 +356,22 @@ follow from the patterns above.
   makes a good anchor. The demo cutoff `2024-03-23T23:58:00Z` is that maximum minus 7
   days. The `opened_date` series ends 2022-12-06, so the new-account window uses
   `2022-11-06`, that maximum minus 30 days.
-- **Drop the upper bound on a multi-hop time window.** Keep the plain ordering
-  `out.transfer_timestamp >= in.transfer_timestamp`. Timestamp-plus-duration comparisons
-  across relationships are unsupported in `WHERE`. If you need turnaround time, compute it
-  in `RETURN` or an aggregating `WITH`, not in the filter.
-- **Avoid `.epochMillis` on a property.** Reading `.epochMillis` off a timestamp property
-  raises the `01N52` unknown-property warning. Compute the gap with
-  `duration.inSeconds(start, end)` instead, and convert the Duration to hours or seconds
-  client-side. Query 10 uses this form. It runs in about 210s, against about 140s for the
-  `.epochMillis` form, and its values are exact against Databricks SQL.
+- **Write a multi-hop time window with `toInteger()`.** Timestamp-plus-duration
+  comparisons across relationships are unsupported in `WHERE`, and so are
+  `duration.inSeconds()` and `duration.between()`. `toInteger()` on a timestamp returns
+  epoch seconds and works in `WHERE`, so a 24-hour upper bound is
+  `toInteger(t_out.transfer_timestamp) - toInteger(t_in.transfer_timestamp) < 86400`. Keep
+  the plain ordering `t_out.transfer_timestamp >= t_in.transfer_timestamp` alongside it. On
+  account 7855 this filter returns 148 of 6,458 ordered transfer pairs, which matches the gap
+  computed client-side.
+- **Compute time gaps with `toInteger()`.** `toInteger()` on a timestamp pushes down to
+  SQL as a cast to epoch seconds. `avg(toInteger(t_out.transfer_timestamp) -
+  toInteger(t_in.transfer_timestamp))` therefore pushes down with its `GROUP BY`.
+  `avg(duration.inSeconds(...))` runs, but it keeps the `GROUP BY` out of the SQL. Reading
+  `.epochMillis` off a timestamp property raises the `01N52` unknown-property warning.
+  Query 10 uses the `toInteger()` form and converts the seconds to hours client-side. The
+  cast drops sub-second parts. Every transfer timestamp in this data is a whole second, so
+  the averages match `duration.inSeconds` to within 4e-8 seconds.
 - **Project timestamps into GDS with `toInteger()` in a `WITH`.** A GDS projection needs a
   numeric timestamp. Bind it first with
   `WITH src, dst, t, toInteger(t.transfer_timestamp) * 1000 AS transfer_timestamp_ms`,
@@ -301,25 +383,43 @@ follow from the patterns above.
   [`gds-guide.md`](gds-guide.md).
 - **Move node-property predicates to a leading `WHERE`.** `WHERE a.balance > 0` belongs
   before the aggregating `WITH`, where it stays on the server.
-- **For cycles**, enumerate fixed-length patterns and `UNION` them, or run against a
-  loaded Aura graph. The quantified path `{2,4}` does not translate and returns `42NG1`.
-  `UNION ALL` is confirmed to run on the Virtual Graph, with each branch as its own pushed
-  warehouse statement. See the two-label count in [Cypher coverage](#cypher-coverage).
+- **For cycles**, enumerate fixed-length patterns from an anchor and combine them with
+  `UNION ALL`, or run against a loaded Aura graph. A quantified path that closes on its
+  start node, such as `(a)-[:TRANSFERRED_TO]->{2,4}(a)`, returns `42NG1`. From account
+  7855, the 2-hop and 3-hop branches return 144 and 13,474 matching paths in 2.4s. Parallel
+  transfers between the same accounts each count as a separate path. Keep the anchor:
+  an unanchored traversal of three or more hops forces the warehouse to build the full
+  join. See [Pattern 5](#pattern-5-anchor-deep-traversals) and
+  [Cypher coverage](#cypher-coverage).
 
 ## Cypher coverage
+
+The official [Cypher coverage](https://neo4j.com/docs/virtual-graph/aura/cypher-coverage/)
+page lists the supported query shape. The rows below come from live tests against this
+Virtual Graph, which reports version `1.0-alpha-01` from `CALL dbms.components()`. Several
+results differ from the official page, and the rows note where. Neo4j says coverage is
+subject to change, so recheck that page and retest when a query fails.
 
 ### Supported
 
 | Construct | Detail |
 |---|---|
-| Aggregation in `WITH` and `RETURN` | `count`, `count(DISTINCT ...)`, `sum`, `avg`, `min`, `max`, `stDev`, `round`, `collect(DISTINCT ...)`, `size()`. The official docs say only `count`, `sum`, `min`, `max`, `avg`, and `collect` push down to SQL. Other aggregations are post-processed. `count(DISTINCT ...)` runs in 2.0s on a 7-day window. See [Pattern 2](#pattern-2-count-distinct-values-on-the-server). |
-| HAVING-style filtering | A `WHERE` after an aggregating `WITH` can filter on an aggregate alias. It runs with or without the `CYPHER 25` prefix. See [Pattern 3](#pattern-3-filter-aggregates-order-and-limit-in-cypher). |
-| Null and existence checks | `IS NULL` and `IS NOT NULL` both run. The tested column has no nulls, so full null semantics were not exercised. |
-| `range()` | `RETURN range(1, 3)` runs. |
-| Property plus aggregate on the same node | `MATCH (a:Account) RETURN a.region, count(a) AS c ORDER BY c DESC LIMIT 10` runs in 0.5s. |
+| Patterns | Relationship chains of any length and direction, undirected patterns such as `(a)-[t:TRANSFERRED_TO]-(b)`, and label expressions such as `(n:Account\|Merchant)` all run. Path returns such as `MATCH p=... RETURN p` run. |
+| Aggregation in `WITH` and `RETURN` | `count`, `count(DISTINCT ...)`, `sum`, `avg`, `min`, `max`, `stDev`, `round`, `collect(DISTINCT ...)`, `size()`. The official docs say only `count`, `sum`, `min`, `max`, `avg`, and `collect` push down to SQL. Other aggregations are post-processed. `ORDER BY` and `LIMIT` inside an aggregating `WITH` also run. `count(DISTINCT r)` over a relationship variable runs but does not push down. See [Pattern 2](#pattern-2-count-distinct-values-on-the-server). |
+| HAVING-style filtering | A `WHERE` after an aggregating `WITH` can filter on an aggregate alias. It runs with or without the `CYPHER 25` prefix. On the aggregating `WITH` itself, it keeps the `GROUP BY` out of the SQL. In a second `WITH`, the `GROUP BY` pushes down. See [Pattern 3](#pattern-3-put-thresholds-in-a-second-with). |
+| `ORDER BY`, `SKIP`, `LIMIT` | All three run in `RETURN`. |
+| Null and existence checks | `IS NULL` and `IS NOT NULL` both run. The official page says such checks always fail, but they run here. The tested column has no nulls, so full null semantics were not exercised. |
+| `range()` | `RETURN range(1, 3)` runs on its own. The official page lists `range()` as unsupported. With a `MATCH` in the same query it fails with `42NG1: Unsupported parameter type List`. |
+| Property plus aggregate on the same node | `MATCH (a:Account) RETURN a.region, count(a) AS c ORDER BY c DESC LIMIT 10` runs and returns the six regions. The official page says this form fails. |
 | `UNION` / `UNION ALL` | Each branch runs as its own pushed warehouse statement and the engine concatenates the results. Verified with a two-label count and used by the cycles recipe. |
 | Plain comparisons in `WHERE` | Numeric comparisons, `abs()`, arithmetic on amounts, `timestamp >= timestamp`, `timestamp >= $param`, `timestamp >= datetime("2020-01-01T00:00:00Z")`. |
-| Temporal projection in `RETURN` | `date(timestamp)`, `duration.inSeconds(...)` and `duration.between(...)`. The `.epochMillis` property also runs, but it raises the `01N52` warning. See [Adaptation recipes](#adaptation-recipes). |
+| `toInteger()` on a timestamp | It returns epoch seconds, in `RETURN`, in a `WITH`, and in `WHERE`. `toInteger(o.transfer_timestamp) - toInteger(i.transfer_timestamp) < 86400` filters to a 24-hour gap. Stock Cypher rejects `toInteger()` on a temporal value, so this form works only on the Virtual Graph. |
+| Temporal projection in `RETURN` | `date(timestamp)`, `duration.inSeconds(...)` and `duration.between(...)`. The `.epochMillis` property also runs, but it raises the `01N52` warning. `duration.inSeconds` inside an aggregate, or `date()` as a group key, keeps the `GROUP BY` out of the SQL. See [Adaptation recipes](#adaptation-recipes). |
+| Open quantified path patterns | An anchored `(a:Account {account_id: 7855})-[:TRANSFERRED_TO]->{1,2}(b:Account)` runs. It must be the only `MATCH` in the query, and no hop may follow the quantified part. The warehouse runs it as a recursive query, so deeper bounds grow fast: `{1,3}` from the same anchor fails after 17s with the Databricks `RECURSION_ROW_LIMIT_EXCEEDED` error at 1,000,000 rows. |
+| `MATCH` followed by `UNWIND` | `MATCH (a:Account {account_id: 7855}) UNWIND [1, 2] AS x RETURN a.account_id, x` runs. A bare `UNWIND [1, 2, 3] AS x RETURN x` also runs. |
+| Correlated `CALL` subquery | `MATCH (a:Account {account_id: 7855}) CALL (a) { MATCH (a)-[t:TRANSFERRED_TO]->(b:Account) RETURN count(t) AS c } RETURN c` runs and returns 119. The official page lists `CALL` as unsupported. |
+| APOC functions in `RETURN` | `RETURN apoc.version()` and `apoc.text.capitalize(a.region)` in `RETURN` run. The official page lists APOC as unsupported. APOC in `WHERE` fails with `42NG0`. |
+| Schema and system procedures | `CALL db.labels()`, `CALL dbms.components()` and `SHOW PROCEDURES` run. |
 
 ### Not supported (returns `42NG0` or `42NG1: Unsupported syntax`)
 
@@ -327,17 +427,16 @@ Most rejections return `42NG1` with a specific reason.
 
 | Construct | Detail |
 |---|---|
-| Writes | `SET`, `CREATE`, `MERGE` all fail. The Virtual Graph is read-only. |
-| `OPTIONAL MATCH` | Fails fast with `42NG1: Unsupported syntax: OPTIONAL MATCH`. This matches the [official Cypher coverage](https://neo4j.com/docs/virtual-graph/aura/cypher-coverage/). Use the split form in [Pattern 4](#pattern-4-split-cross-products-into-independent-halves). |
-| Temporal arithmetic in a filtering `WHERE` | `datetime() - duration({...})`, `date() - duration({...})`, timestamp-plus-duration compared across relationships, `duration.inSeconds(...)` and `duration.between(...)`, and `.epochMillis` subtraction. The same functions work in `RETURN`. |
-| Variable-length and quantified path patterns | For example `(a)-[:TRANSFERRED_TO]->{2,4}(a)`, which returns `42NG1: Equijoin on the outer nodes of a quantified path pattern is not supported`. `*1..2` returns `42NG1: Unsupported var-length relationship`. |
-| Counting two labels in one chained statement | `MATCH (a:Account) WITH count(a) ... MATCH (m:Merchant) ...` fails at parse time with `42NG1: Aggregating WITH clause is not supported`. The blocker is the `WITH`, not the `count`. `WITH` is a projection boundary: it ends one query part and begins another, carrying forward only the variables it names. The Virtual Graph cannot translate a second `MATCH` opened after that aggregating `WITH` horizon. The chained form fails regardless of what is being aggregated, and `count()` itself is supported on each side. Workaround: combine two single-label counts with `UNION ALL` in one statement. Each branch has its own independent scope and runs as its own pushed warehouse query. |
+| Writes | `SET` fails with `42NG0`. The official page lists every write clause, including `CREATE` and `MERGE`, as unsupported. The Virtual Graph is read-only. |
+| `OPTIONAL MATCH` | Fails fast with `42NG1: Unsupported syntax: OPTIONAL MATCH`, with or without `CYPHER 25`. This matches the official page. Use the split form in [Pattern 4](#pattern-4-split-cross-products-into-independent-halves). |
+| Temporal arithmetic in a filtering `WHERE` | `datetime() - duration({...})`, `date() - duration({...})`, timestamp-plus-duration compared across relationships, `duration.inSeconds(...)` and `duration.between(...)`, and `.epochMillis` subtraction all fail with `42NG0`. The same functions work in `RETURN`. `toInteger()` arithmetic works in `WHERE` instead. |
+| Variable-length paths and closed quantified paths | `*1..2` returns `42NG1: Unsupported var-length relationship`. `(a)-[:TRANSFERRED_TO]->{2,4}(a)` returns `42NG1: Equijoin on the outer nodes of a quantified path pattern is not supported`. A hop after the quantified part returns `42NG1: Path concatenation is only supported in the context of a (node pattern, quantified path pattern, node pattern)`. A second `MATCH` returns `42NG1: Quantified path patterns are only supported in queries containing a single MATCH clause`. |
+| `MATCH` after `WITH` | `MATCH (a:Account) WITH count(a) ... MATCH (m:Merchant) ...` fails at parse time with `42NG1: Aggregating WITH clause is not supported`. A plain `WITH a` followed by `MATCH` fails with `42NG0`. The official page states the rule: a `MATCH` after a `WITH` is unsupported. `WITH` is a projection boundary: it ends one query part and begins another, carrying forward only the variables it names. The Virtual Graph cannot translate a second `MATCH` opened after that horizon. `count()` itself is supported on each side. Workaround: combine two single-label counts with `UNION ALL` in one statement. Each branch has its own independent scope and runs as its own pushed warehouse query. |
 | `CYPHER 25` version prefix | Runs, but does not enable any of the above. |
-| Subqueries and `CALL` | `EXISTS { MATCH ... }` and other subquery expressions are unsupported. `CALL () { ... }` returns `42NG1: The query must start with at least one MATCH clause`. The one exception is the GDS path in [`gds-guide.md`](gds-guide.md). |
-| `UNWIND` followed by `MATCH` | `UNWIND` works only when no `MATCH` clause follows it. |
-| APOC, vector search, fulltext search | All unsupported. |
-
-These rows come from the official [Cypher coverage](https://neo4j.com/docs/virtual-graph/aura/cypher-coverage/) page. Neo4j says coverage is subject to change, so recheck that page when a query fails.
+| Subquery expressions and leading `CALL` | `EXISTS { MATCH ... }` and `COUNT { ... }` fail with `42NG0`. `CALL () { ... }` at the start of a query returns `42NG1: The query must start with at least one MATCH clause`. The GDS path in [`gds-guide.md`](gds-guide.md) and the correlated `CALL` above run. |
+| `UNWIND` followed by `MATCH` | `UNWIND [7855, 1032] AS id MATCH (a:Account {account_id: id}) ...` fails with `42NG0`. This matches the official page. |
+| Vector search | `db.index.vector.queryNodes` fails with `The attempted kind of operations are not supported on virtual graph databases`. |
+| Fulltext search | The official page lists it as unsupported. This graph has no fulltext index, so the test query failed with `There is no such fulltext schema index` and the procedure itself was not exercised. |
 
 ## Performance and the connection pool
 
@@ -355,10 +454,10 @@ The timings below were measured on 2026-09-23.
 | `count` of 25,000 nodes | 1.4s |
 | `max(timestamp)` | 1.3s |
 | Single-hop aggregation scanning the full relationship table | 3.6s |
-| Aggregation grouped by a whole node | 1.1 to 1.3s |
-| `count(DISTINCT ...)` with a scalar key | 1.5s on a 1-day window, 2.0s on 7 days |
-| Shared-merchant burst with `collect(DISTINCT ...)` | about 5s |
-| Two-hop pattern joins | pass-through mule about 4 to 6s, round trips about 3 to 4s, rapid-turnover about 210s |
+| Pushed aggregations, fraud queries 1 to 6 | 0.5 to 0.9s |
+| Courier query, both halves | about 4s |
+| Shared-merchant burst with `collect(DISTINCT ...)` | 5 to 9s |
+| Two-hop pattern joins | round trips about 1s, pass-through mule 1 to 2s, rapid-turnover about 1s |
 
 How the pool behaves:
 
@@ -404,9 +503,23 @@ one names the form to use instead.
 - **A group key aliased to a backing column name.** `mule.account_id AS account_id` fails
   with `AMBIGUOUS_REFERENCE`. Use a distinct alias such as `mule_id`, per the aliasing rule
   in [Pattern 2](#pattern-2-count-distinct-values-on-the-server).
-- **Unbounded two-hop joins.** Rapid-turnover completes in about 210s. Bound the window
-  and move turnaround time into `RETURN`. See
-  [Pattern 6](#pattern-6-keep-result-sets-small).
+- **A node or relationship as a group key.** `WITH mule, count(*) ...` or
+  `WITH mule_id, t_in, ...` keeps the `GROUP BY` out of the SQL, so every match crosses
+  into the graph engine. Query 10 in that form took 208s. Group on scalar properties such
+  as `mule.account_id` and `t_in.link_id`, per
+  [Pattern 1](#pattern-1-group-by-scalar-keys).
+- **A threshold on the aggregating `WITH`.** `WITH k, count(t) AS c WHERE c >= 100` keeps
+  the `GROUP BY` out of the SQL. Query 7's transfer half took about 11s in that form. Move
+  the `WHERE` into a second `WITH`, per
+  [Pattern 3](#pattern-3-put-thresholds-in-a-second-with).
+- **`count(DISTINCT r)` on a relationship, or `duration.inSeconds` inside an aggregate.**
+  Both run, and both keep the `GROUP BY` out of the SQL. Count the relationship's
+  `link_id`, per [Pattern 2](#pattern-2-count-distinct-values-on-the-server). Compute gaps
+  with `toInteger()`, per [Adaptation recipes](#adaptation-recipes).
+- **`ORDER BY` with `LIMIT` on an unanchored traversal of three or more hops.** The
+  warehouse builds the full join before it can pick the top rows. A sorted three-hop query
+  takes about 37s, and a sorted four-hop query ran past 99s. Anchor the traversal, or drop
+  the sort. See [Pattern 5](#pattern-5-anchor-deep-traversals).
 - **Layering cycles with a `{2,4}` path.** The quantified path returns `42NG1: Equijoin on
   the outer nodes of a quantified path pattern is not supported`. The path itself is the
   coverage gap, so reshaping the `WITH` does not help. Enumerate fixed-length patterns and
@@ -414,11 +527,12 @@ one names the form to use instead.
 
 ## Appendix: loaded-graph reference forms
 
-These are the standard, loaded-graph forms of each fraud signal. They do not run verbatim
-on the Virtual Graph. They show the gap between the textbook query and the adapted form.
-The **Virtual Graph: ✓ / ✗** marker shows only whether the signal is achievable at all. It
-does not mean the Cypher runs as written. Every ✓ needs the adaptations above, most often
-replacing relative time windows with `$since`. The post-aggregation `WHERE` runs as
+These are the standard, loaded-graph forms of each fraud signal. They show the gap
+between the textbook query and the adapted form. Forms 2, 4, 6, 7 and 11 run verbatim on
+the Virtual Graph. They group by nodes and put thresholds on the aggregating `WITH`, so
+their aggregation does not push down. The other forms need the adaptations above, most
+often replacing relative time windows with `$since`. The **Virtual Graph: ✓ / ✗** marker
+shows only whether the signal is achievable at all. It does not mean the Cypher runs as
 written. The one ✗, cycles, uses a quantified path the Virtual Graph cannot translate.
 
 These forms use the same `:Account` / `:Merchant` labels as the Virtual Graph model.
@@ -454,19 +568,19 @@ LIMIT 50
 ### 3. Pass-through mule (local betweenness proxy): ✓
 
 ```cypher
-MATCH (a:Account)-[in:TRANSFERRED_TO]->(mule:Account)-[out:TRANSFERRED_TO]->(b:Account)
-WHERE out.transfer_timestamp >= in.transfer_timestamp
-  AND out.transfer_timestamp <= in.transfer_timestamp + duration({hours: 48})
-  AND abs(out.amount - in.amount) <= 0.05 * in.amount
+MATCH (a:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)-[t_out:TRANSFERRED_TO]->(b:Account)
+WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
+  AND t_out.transfer_timestamp <= t_in.transfer_timestamp + duration({hours: 48})
+  AND abs(t_out.amount - t_in.amount) <= 0.05 * t_in.amount
   AND a <> b
 RETURN mule.account_id,
        count(*)                 AS passthroughs,
-       round(sum(in.amount), 2) AS volume
+       round(sum(t_in.amount), 2) AS volume
 ORDER BY passthroughs DESC
 LIMIT 50
 ```
 
-This textbook form sums `in.amount` once per matching outgoing transfer, so `volume`
+This textbook form sums `t_in.amount` once per matching outgoing transfer, so `volume`
 counts an incoming transfer several times. The Virtual Graph form in the fraud demo groups
 by mule and incoming transfer first, so each incoming transfer counts once.
 
@@ -489,7 +603,7 @@ transfer several times. Query 3 in the fraud demo counts each direction with
 
 ### 5. Layering cycles: ✗ (loaded graph only)
 
-The variable-length path `{2,4}` is a coverage gap. Run on the loaded Aura graph, or
+The quantified path `{2,4}` that closes on its start node is a coverage gap. Run on the loaded Aura graph, or
 enumerate fixed lengths as separate single-`MATCH` queries and `UNION` them, which is a
 confirmed-working construct on the Virtual Graph.
 
@@ -560,18 +674,22 @@ LIMIT 15
 ### 10. Rapid-turnover summary per account: ✓
 
 ```cypher
-MATCH (src:Account)-[in:TRANSFERRED_TO]->(mule:Account)-[out:TRANSFERRED_TO]->(dst:Account)
-WHERE out.transfer_timestamp >= in.transfer_timestamp
-  AND out.transfer_timestamp <= in.transfer_timestamp + duration({hours: 24})
+MATCH (src:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)-[t_out:TRANSFERRED_TO]->(dst:Account)
+WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
+  AND t_out.transfer_timestamp <= t_in.transfer_timestamp + duration({hours: 24})
   AND src <> dst
 WITH mule,
      count(*) AS rapid_pairs,
-     avg(duration.inSeconds(in.transfer_timestamp, out.transfer_timestamp).seconds) / 3600.0 AS avg_hours
+     avg(duration.inSeconds(t_in.transfer_timestamp, t_out.transfer_timestamp).seconds) / 3600.0 AS avg_hours
 WHERE rapid_pairs >= 50
 RETURN mule.account_id, rapid_pairs, round(avg_hours, 1) AS avg_turnaround_hours
 ORDER BY rapid_pairs DESC
 LIMIT 15
 ```
+
+On the Virtual Graph, `avg(duration.inSeconds(...))` keeps the `GROUP BY` out of the SQL.
+The demo's query 10 computes the gap with `toInteger()` arithmetic instead, which pushes
+down.
 
 ### 11. Velocity ratio (volume vs. balance): ✓
 

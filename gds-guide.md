@@ -1,7 +1,7 @@
 # Creating a GDS Session on a Virtual Graph
 
-This guide explains how to run Graph Data Science (GDS) algorithms against a Neo4j
-Virtual Graph by creating a **GDS Session**.
+This guide explains how to run Graph Data Science algorithms against a Neo4j Virtual
+Graph by creating a **GDS Session**. The rest of the guide calls Graph Data Science GDS.
 
 ## Background
 
@@ -43,7 +43,7 @@ your rules did not think to look for. For the plain-Cypher forms of these signal
 A GDS Session is triggered by passing a **configuration** to `gds.graph.project` that
 contains **either**:
 
-- an **instance size** (memory in GB), e.g. `{ memory: '2GB' }`, **or**
+- an **instance size** in GB of memory, for example `{ memory: '2GB' }`, **or**
 - an existing **`sessionId`** to reuse a running session.
 
 Without one of these, the call won't start a session.
@@ -102,7 +102,9 @@ RETURN gds.graph.project(
 )
 ```
 
-A weighted projection provisions in the same time as an unweighted one.
+A projection weighted by `amount` provisions in the same time as an unweighted one. Both
+took about 33s in the `gds-probe` run on 2026-09-24. Scenarios that add a timestamp or a
+node property took about 10s longer, at 43.6 to 44.6s.
 
 ## ID requirements
 
@@ -123,12 +125,12 @@ plain Cypher but cannot be projected into GDS.
 
 ## Project only numeric properties
 
-The projections above carry only labels and the relationship type. If you also project
-node or relationship **properties**, every projected property must be **numeric** (Long,
-Double, or a numeric array). A GDS in-memory graph cannot hold a temporal or string
-property, so adding one to the `dataConfig` makes the projection fail fast, before the
-session provisions, with an `IllegalArgumentException` that names the offending property
-and type:
+The projections above carry labels, the relationship type, and at most the numeric
+`amount`. Every projected property must be **numeric**. A node property can be a Long, a
+Double, or a list of either. A relationship property must be a single Long or Double. A
+GDS in-memory graph cannot hold a temporal or string property, so adding one to the
+`dataConfig` makes the projection fail fast, before the session provisions, with an
+`IllegalArgumentException` that names the offending property and type:
 
 ```
 The property `relationship.ts` contained a value of type `DateTime`, which is not supported.
@@ -194,8 +196,9 @@ Weighted PageRank works. The `gds-probe` sweep runs it on the 7-day window after
 projecting the `amount` property.
 
 The standalone `CALL gds.<algorithm>.stream(...)` form works. The stream returns
-GDS-internal `nodeId`s. Each one encodes the source table in its top bits and the source ID
-in its low 50 bits, shifted left by one. This formula recovers the `account_id`:
+GDS-internal `nodeId`s. Each one encodes the source table in its top bits. Its low 50
+bits hold the source ID shifted left by one. To recover the `account_id`, mask the low 50
+bits and shift right by one:
 
 ```
 account_id = (nodeId & (2^50 - 1)) >> 1
@@ -231,13 +234,16 @@ cleanly. The harness is the `fast-gds` demo (`src/demos/gds_fast.py`, run with
 The "window" here is a time-range filter on the transfer rows. `--since-days` and
 `--since-hours` keep only transfers from the most recent N days or hours of the data. The
 resulting row count is the edge count projected into the graph. The default is 7 days. A
-run on 2026-09-23 with the default window produced these timings:
+run with the default window produced these timings, across runs on 2026-09-23 and
+2026-09-24:
 
-- Sizing count: 3.2s for 23,198 edges, no session.
-- Projection that provisions the session: 38.0s, returning a registered graph of 15,588
-  nodes and 23,198 relationships. The returned `projectMillis` was 34,835.
-- `gds.pageRank.stream`: 2.3s for the top 10 accounts, with real scores.
-- `gds.graph.drop`: 1.2s.
+- Sizing count: 0.3 to 3.2s for 23,198 edges, no session. The slower figure came from a
+  cold warehouse.
+- Projection that provisions the session: 34.4 to 38.0s, returning a registered graph of
+  15,588 nodes and 23,198 relationships. The returned `projectMillis` was 33,357 to
+  34,835.
+- `gds.pageRank.stream`: 2.3 to 2.5s for the top 10 accounts, with real scores.
+- `gds.graph.drop`: 1.2 to 2.5s.
 
 The Databricks query behind the projection took about 1 second. Almost the entire
 projection call is session provisioning, the cold start of the ephemeral compute. The
@@ -245,19 +251,22 @@ Databricks query and the algorithm are small by comparison. Provisioning took 31
 seconds across runs, and it was about the same for 298 edges as for 23,198.
 
 **Projection size is flexible.** A projection of all 300,000 transfers completed in 41.0s.
-Provisioning is most of that time. Use `--count-only` to count the rows in a window for
-free and `--keep` to reuse a provisioned session.
+Provisioning is most of that time. Use `--count-only` to count the rows in a window
+with one cheap warehouse query and no session. Use `--keep` to reuse a provisioned
+session.
 
 **The property sweep.** The `gds-probe` demo runs scenarios A to E on the same 7-day
-window. Each scenario provisions its own session and projects in 34 to 46 seconds.
+window. Each scenario provisions its own session and projects in 33 to 46 seconds.
 
-**Clean up after a dropped connection.** If the Bolt connection drops during a run, the
-demo cannot drop its graph. A default `fast-gds` run uses a new graph name with a random
+**Cleanup after a failure.** After any projection failure, both demos try to drop the
+graph they were projecting. That covers a server error, a dropped Bolt connection, and a
+second session conflict. The drop is best effort. If the connection is gone for good,
+the graph can stay behind. A default `fast-gds` run uses a new graph name with a random
 suffix, so a leftover graph cannot block the next run. If the projection fails with a
 session conflict, the demo retries once under a new name. With `--graph`, the demo drops a
-stale graph of that name before it starts. `gds-probe` drops a stale graph of its name
-before each scenario. To check for
-leftovers, run `CALL gds.graph.list()`.
+stale graph of that name before it starts. `gds-probe` gives each scenario its own name,
+built from `--graph` plus a random suffix. A scenario whose final drop fails reports
+PARTIAL. To check for leftovers, run `CALL gds.graph.list()`.
 
 ## Future expansion: possible new examples
 

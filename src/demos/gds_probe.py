@@ -4,7 +4,8 @@ GDS accepts numeric graph properties, so the sweep projects the numeric amount a
 converts transfer timestamps to epoch milliseconds. It inspects string properties but
 skips their projection because a string identifier has no useful numeric equivalent.
 
-Each projection scenario provisions its own session, so the sweep takes a few minutes.
+Each projection scenario provisions its own session under a unique graph name, so the
+sweep takes a few minutes. A failed projection drops the graph it tried to create.
 The default 7-day window works (roughly 35-45s per scenario); ``--since-hours`` only
 narrows the window.
 """
@@ -19,7 +20,12 @@ from neo4j import Driver, GraphDatabase
 from neo4j.time import Date, DateTime, Duration, Time
 
 from connection import load_connection
-from demos.gds_common import DROP_GRAPH, run_statement
+from demos.gds_common import (
+    DROP_GRAPH,
+    new_graph_name,
+    project_with_cleanup,
+    run_statement,
+)
 from helpers import data_max_dates
 
 COUNT_WINDOW = """
@@ -112,10 +118,15 @@ def _type_name(value: object) -> str:
 
 
 def _pick_props(node_props: dict[str, object]) -> tuple[str | None, str | None]:
-    """Pick one numeric and one non-numeric node property to probe, if available."""
+    """Pick one numeric and one non-numeric node property to probe, if available.
+
+    The numeric pick skips identifier keys such as ``account_id``, because an ID
+    projects as a number but carries no measurement.
+    """
     numeric = next(
         (k for k, v in node_props.items()
-         if isinstance(v, (int, float)) and not isinstance(v, bool)),
+         if isinstance(v, (int, float)) and not isinstance(v, bool)
+         and k != "id" and not k.endswith("_id")),
         None,
     )
     non_numeric = next(
@@ -166,8 +177,11 @@ def _build_scenarios(node_num: str | None, node_str: str | None) -> list[Scenari
     return scenarios
 
 
-def run_probe(args: argparse.Namespace) -> None:
-    """Sweep usable GDS property configs on the recent transfer window."""
+def run_probe(args: argparse.Namespace) -> bool:
+    """Sweep usable GDS property configs on the recent transfer window.
+
+    Returns ``False`` when sizing fails or any scenario ends in FAIL or PARTIAL.
+    """
     uri, auth = load_connection()
 
     print(f"Connecting to {uri} ...")
@@ -188,27 +202,29 @@ def run_probe(args: argparse.Namespace) -> None:
         sized = run_statement(driver, f"size window (count edges, {window_label})",
                               COUNT_WINDOW, {"since": since})
         if sized is None:
-            return
+            return False
         edges = sized[0]["edges"]
         print(f"  -> {edges} edge(s) in the window.")
         if edges == 0:
             print("\nWindow is empty; widen --since-hours/--since-days.")
-            return
+            return True
 
         node_num, node_str = _introspect(driver, since)
         if args.count_only:
             print("\n--count-only set; introspected the schema without provisioning.")
-            return
+            return True
 
         scenarios = _build_scenarios(node_num, node_str)
-        print(f"\nRunning {len(scenarios)} projection scenario(s) on '{args.graph}', "
-              f"memory={args.memory}. Each provisions its own session.")
+        print(f"\nRunning {len(scenarios)} projection scenario(s) as "
+              f"'{args.graph}_<id>', memory={args.memory}. Each provisions its own "
+              "session.")
 
         results: list[tuple[str, str, str]] = []
         for scenario in scenarios:
             results.append(_run_scenario(driver, args, since, scenario))
 
         _print_summary(results)
+        return all(status in ("OK", "SKIP") for _, status, _ in results)
 
 
 def _introspect(driver: Driver, since: dt.datetime) -> tuple[str | None, str | None]:
@@ -233,21 +249,22 @@ def _introspect(driver: Driver, since: dt.datetime) -> tuple[str | None, str | N
 
 def _run_scenario(driver: Driver, args: argparse.Namespace, since: dt.datetime,
                   scenario: Scenario) -> tuple[str, str, str]:
-    """Drop any stale graph, run one projection scenario, optionally check it, drop."""
+    """Run one projection scenario under a unique name, optionally check it, drop."""
     print(f"\n{'=' * 78}\nScenario {scenario.key}: {scenario.description}")
     if scenario.skip_reason is not None:
         print(f"  SKIPPED: {scenario.skip_reason}")
         return (scenario.key, "SKIP", scenario.skip_reason)
 
-    run_statement(driver, f"drop stale '{args.graph}'", DROP_GRAPH,
-                  {"graph": args.graph})
-
-    assert scenario.data_config is not None
+    if scenario.data_config is None:
+        raise ValueError(f"scenario {scenario.key} has no data config to project")
     cypher = PROJECT_TEMPLATE.format(data_config=scenario.data_config,
                                      with_clause=scenario.with_clause)
-    projected = run_statement(
+    # Every scenario gets its own name, so a failed session or leftover mapping from
+    # one scenario cannot block the next. A failed projection drops the name it used.
+    projected, graph = project_with_cleanup(
         driver, f"project ({scenario.key})", cypher,
-        {"graph": args.graph, "memory": args.memory, "since": since})
+        {"memory": args.memory, "since": since}, new_graph_name(args.graph),
+        retry_prefix=args.graph)
 
     if projected is None:
         return (scenario.key, "FAIL", "projection rejected (see error above)")
@@ -264,16 +281,17 @@ def _run_scenario(driver: Driver, args: argparse.Namespace, since: dt.datetime,
     if scenario.weight_prop is not None:
         weighted = run_statement(
             driver, f"weighted PageRank on '{scenario.weight_prop}'",
-            PAGERANK_WEIGHTED.format(prop=scenario.weight_prop), {"graph": args.graph})
+            PAGERANK_WEIGHTED.format(prop=scenario.weight_prop), {"graph": graph})
         if weighted is None:
-            run_statement(driver, f"drop '{args.graph}'", DROP_GRAPH,
-                          {"graph": args.graph})
+            run_statement(driver, f"drop '{graph}'", DROP_GRAPH, {"graph": graph})
             return (scenario.key, "PARTIAL",
                     (f"{detail}; but weighted PageRank on '{scenario.weight_prop}' "
                      "failed"))
         detail += f"; weighted PageRank OK ({len(weighted)} rows)"
 
-    run_statement(driver, f"drop '{args.graph}'", DROP_GRAPH, {"graph": args.graph})
+    dropped = run_statement(driver, f"drop '{graph}'", DROP_GRAPH, {"graph": graph})
+    if dropped is None:
+        return (scenario.key, "PARTIAL", f"{detail}; but dropping '{graph}' failed")
     return (scenario.key, "OK", detail)
 
 

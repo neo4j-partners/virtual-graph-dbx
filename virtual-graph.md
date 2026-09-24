@@ -40,7 +40,7 @@ To find your catalog and schema:
 2. Select your catalog.
 3. The **Overview** tab lists the available schemas.
 
-For Finance Genie, the catalog and schema are the ones the setup notebook created. The notebook sets them as `CATALOG` and `SCHEMA` in its configuration cell.
+For Finance Genie, the catalog and schema are the ones the setup notebook created. The notebook sets them as `CATALOG` and `SCHEMA` in its configuration cell. The defaults are `virtual-graph-dbx` and `vg-schema`.
 
 ## 3. Create the Virtual Graph in Aura
 
@@ -66,13 +66,17 @@ When the connection verifies, the **Confirm** step lists your Databricks data so
 
 ![Finance Genie Virtual Graph connection confirmed](./docs/images/finance-genie-vg.png)
 
-The panel shows the data source set to Databricks with the server hostname, HTTP path, catalog, and schema you entered, and the discovered tables on the right. The table list is scrollable; the screenshot shows the top of it:
+The panel shows the data source set to Databricks with the server hostname, HTTP path, catalog, and schema you entered. The discovered tables appear on the right. The table list is scrollable, and the screenshot shows the top of it.
+
+The screenshot comes from an earlier setup. It shows the catalog `graph-on-databricks` and the schema `graph-enriched-schema`. Its `accounts` table has no `account_name` column. With the notebook defaults, your panel shows `virtual-graph-dbx` and `vg-schema`, and these tables:
 
 - `account_labels` with `account_id` and `is_fraud`
 - `account_links` with `link_id`, `src_account_id`, `dst_account_id`, `amount`, and `transfer_timestamp`
-- `accounts` with `account_id`, `account_hash`, `account_type`, `region`, `balance`, `opened_date`, and `holder_age`
+- `accounts` with `account_id`, `account_hash`, `account_name`, `account_type`, `region`, `balance`, `opened_date`, and `holder_age`
+- `merchants` with `merchant_id`, `merchant_name`, `category`, and `region`
+- `transactions` with `txn_id`, `account_id`, `merchant_id`, `amount`, `txn_timestamp`, and `txn_hour`
 
-Scroll down to see the remaining two tables, `merchants` and `transactions`. All five Silver tables are discovered. Seeing these tables and columns confirms that Aura can reach the warehouse and read the Finance Genie schema.
+Scroll down to see `merchants` and `transactions`. All five Silver tables are discovered. Seeing these tables and columns confirms that Aura can reach the warehouse and read the Finance Genie schema.
 
 ## 4. Select a graph model
 
@@ -88,15 +92,15 @@ The target model is two node types and two relationship types:
 
 - `:Account` nodes from the `accounts` table
 - `:Merchant` nodes from the `merchants` table
-- `TRANSACTED_WITH` relationships (`:Account` → `:Merchant`) from the `transactions` table
-- `TRANSFERRED_TO` relationships (`:Account` → `:Account`) from the `account_links` table
+- `TRANSACTED_WITH` relationships from `:Account` to `:Merchant`, built from the `transactions` table
+- `TRANSFERRED_TO` relationships from `:Account` to `:Account`, built from the `account_links` table
 
-The names follow Neo4j conventions. Node labels are singular PascalCase, such as `Account`. Relationship types are UPPER_SNAKE_CASE, such as `TRANSFERRED_TO`. The Databricks tables keep their plural SQL names, such as `accounts`. The model maps one to the other. Every query in this project uses `:Account` and `:Merchant`, so they fail against a model that still has the generated `:accounts` / `:merchants` labels.
+The names follow Neo4j conventions. Node labels are singular PascalCase, such as `Account`. Relationship types are UPPER_SNAKE_CASE, such as `TRANSFERRED_TO`. The Databricks tables keep their plural SQL names, such as `accounts`. The model maps one to the other. Every query in this project uses `:Account` and `:Merchant`, so they fail against a model that still has the generated `:accounts` and `:merchants` labels.
 
 Build that model with the following steps.
 
 1. Remove `account_labels` from the data source so Aura does not model it.
-2. Select **Generate from schema**. Aura infers nodes and relationships from the remaining table schema and foreign keys.
+2. Select **Generate from schema**. Aura maps the remaining tables to nodes and relationships.
 3. Remove every relationship Aura generated. You will recreate the two you need by hand so the node ID mappings are explicit.
 4. Remove the `transactions` and `account_links` nodes. These are edge tables and become relationships, not nodes.
 5. Rename the two remaining node labels. **Generate from schema** labels each node after its table, so the nodes arrive as `accounts` and `merchants`. Change the label of `accounts` to `Account` and the label of `merchants` to `Merchant`. Leave the backing tables unchanged.
@@ -118,7 +122,7 @@ Build that model with the following steps.
 
    ![Create the TRANSACTED_WITH relationship](./docs/images/load-vg-step-1.png)
 
-7. Create the `TRANSFERRED_TO` relationship, as shown below. Both ends map to the `Account` node; the source and destination differ only by which column supplies the ID:
+7. Create the `TRANSFERRED_TO` relationship, as shown below. Both ends map to the `Account` node. The source and destination differ only by which column supplies the ID:
 
    - Set the **Relationship type** to `TRANSFERRED_TO`.
    - Under **Properties**, map from the `account_links` table:
@@ -135,40 +139,44 @@ Build that model with the following steps.
 
    ![Create the TRANSFERRED_TO relationship](./docs/images/load-vg-step-2.png)
 
+   The `txn_timestamp` and `transfer_timestamp` columns are Databricks `TIMESTAMP` columns. The engine reports both properties as `LOCAL DATETIME` in `db.schema.relTypeProperties()`. The values themselves come back as UTC datetimes, and `valueType()` reports them as `ZONED DATETIME`. Compare them against zoned literals such as `datetime("2024-03-23T23:58:00Z")`, as every query in this project does.
+
 8. Select **Create Virtual Graph** to save the model, and download the credentials file when prompted. The instance password cannot be changed later and is not recoverable. If you lose it, you must delete and recreate the Virtual Graph.
 
 ## Indexes for the model
 
 The model editor exposes an **Indexes** tab on both nodes and relationships, alongside the
-**Properties** and **Constraints** tabs. Add an index with `+` and pick a property; the
+**Properties** and **Constraints** tabs. Add an index with `+` and pick a property. The
 index type is Neo4j's default `range` index.
 
-The model already carries four indexes after the steps above, all created for you:
+The model editor showed four indexes after the steps above, all created for you. They
+are not visible from Cypher, because `SHOW INDEXES` returns no rows on the Virtual Graph:
 
 - `Account.account_id` and `Merchant.merchant_id`, the range indexes that back each node's
   ID uniqueness constraint.
 - `TRANSACTED_WITH.txn_id` and `TRANSFERRED_TO.link_id`, from the optional relationship
   **ID** property set on each relationship.
 
-None of those sit on the columns the demo queries filter by. The fraud queries and the GDS
-session window all filter on timestamps, amounts, and account dates, not on the ID
-columns. The Aura Import guidance is to add a range index to any property you regularly
-filter by range. The five additions below map to the queries in
-[`finding-fraud.md`](docs/finding-fraud.md) and the GDS path in [`gds-guide.md`](gds-guide.md),
-ordered by how many queries each one serves:
+None of those sit on the columns the demo queries filter by. The fraud queries that
+filter use timestamps, amounts, and account dates, and so does the GDS session window.
+The Aura Import guidance is to add a range index to any property you regularly filter by
+range. The additions below follow that guidance for the queries in
+[`finding-fraud.md`](docs/finding-fraud.md) and the GDS path in
+[`gds-guide.md`](gds-guide.md). Their effect on a Virtual Graph is unmeasured. See the
+caveat after the table.
 
 | Index | Type | Backs |
 |-------|------|-------|
-| `TRANSFERRED_TO.transfer_timestamp` | range | The GDS session window (`WHERE t.transfer_timestamp >= $since`), Collection accounts (query 5), Spray accounts (query 6), and the collection / spray finder queries. Highest coverage. |
+| `TRANSFERRED_TO.transfer_timestamp` | range | The GDS session window `WHERE t.transfer_timestamp >= $since`, Collection accounts (query 5), Spray accounts (query 6), and the collection and spray finder queries. It matches the most filters. |
 | `TRANSFERRED_TO.amount` | range | Structuring (query 1), the selective `>= 9000 AND < 10000` filter. |
 | `Account.opened_date` | range | New accounts moving large sums (query 2). |
 | `Account.balance` | range | Velocity ratio (query 4). |
-| `TRANSACTED_WITH.txn_timestamp` | range | Shared-merchant burst and any merchant time-window query. |
+| `TRANSACTED_WITH.txn_timestamp` | range | No demo query filters on it. Shared-merchant burst (query 9) groups by its day. Add it for queries that filter merchant transactions by time. |
 
 For the GDS session specifically, the projection query is
 `MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account) WHERE t.transfer_timestamp >= $since`.
-The index that maps to it is `TRANSFERRED_TO.transfer_timestamp`, the same index that
-serves the fan-in and fan-out fraud queries, so it is the single highest-value addition.
+The index that matches it is `TRANSFERRED_TO.transfer_timestamp`. The fan-in and fan-out
+fraud queries filter on the same property.
 
 Skip these, with the reason:
 
@@ -176,7 +184,7 @@ Skip these, with the reason:
   constraints, so the anchored visualization lookups such as `{account_id: 184}` are
   already covered.
 - `account_type`, `region`, and merchant `category` are `GROUP BY` keys, not selective
-  range filters, and a range index does not help a grouping scan.
+  range filters. A range index does not help a grouping scan.
 - `txn_hour` and `holder_age` are not filtered selectively by any demo query.
 - `TRANSACTED_WITH.amount` has no range filter in the current fraud query set. Add it later
   only if a merchant-amount threshold query joins the set.
@@ -194,7 +202,7 @@ adding it.
 
 ## 6. Inspect your graph
 
-Select **Query** from the left-side navigation and run Cypher against the Virtual Graph. Aura compiles each query into SQL and pushes most of the work to your Databricks warehouse; graph-specific operations run in Neo4j's graph compute layer.
+Select **Query** from the left-side navigation and run Cypher against the Virtual Graph. Aura compiles each query into SQL and pushes most of the work to your Databricks warehouse. Graph-specific operations run in Neo4j's graph compute layer.
 
 ### Transfers between accounts
 

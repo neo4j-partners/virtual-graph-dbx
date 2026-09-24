@@ -2,8 +2,8 @@
 
 This project demonstrates the Neo4j Virtual Graph, which enables zero-copy querying of
 Databricks lakehouses with Cypher. The Virtual Graph compiles Cypher into SQL and pushes
-most of the work down to the backing Databricks SQL warehouse; graph-specific operations
-are handled by Neo4j's graph compute layer, and how much runs where depends on the query.
+most of the work down to the backing Databricks SQL warehouse. Neo4j's graph compute
+layer handles graph-specific operations. How much runs where depends on the query.
 The project walks through setting up the Finance Genie sample lakehouse on Databricks,
 creating a Virtual Graph over it in Aura, and querying that graph. It also documents best
 practices, how to use GDS Sessions, and the current limitations of the Virtual Graph.
@@ -37,16 +37,17 @@ graph algorithms like PageRank, so you can see both what runs well and where the
 Graph reaches its current limits.
 
 Getting it running is three steps: create the Silver tables on Databricks, build the
-Virtual Graph over them in Aura, then run the demos.
+Virtual Graph over them in Aura, then run the demos. The `100m` demo is a separate,
+optional Step 4. It runs SQL on Databricks directly and does not use the Virtual Graph.
 
 ## Quick start
 
 Prerequisites:
 
 - `uv` installed.
-- A Databricks workspace with permission to create a schema, volume, and tables, used
-  once by the lakehouse setup notebook (Step 1).
-- A project `.env` (copy `.env.sample`) with the Aura connection:
+- A Databricks workspace with permission to create a schema, volume, and tables. The
+  lakehouse setup notebook in Step 1 uses it once.
+- A project `.env` with the Aura connection. Copy `.env.sample` to create it:
 
   ```
   NEO4J_URI=neo4j+s://<instance>.graph-engine.neo4j.io
@@ -60,9 +61,9 @@ Prerequisites:
   - **`DATABRICKS_CONFIG_PROFILE`, for `100m` only.** It names the Databricks profile in
     `~/.databrickscfg`. The demo falls back to `DATABRICKS_PROFILE`, then to `DEFAULT`.
   - **`DATABRICKS_CATALOG`, for `100m` only.** The demo falls back to `CATALOG`, then to
-    `graph-on-databricks`.
+    `virtual-graph-dbx`.
   - **`DATABRICKS_SCHEMA`, for `100m` only.** The demo falls back to `SCHEMA`, then to
-    `graph-enriched-schema`.
+    `vg-schema`.
   - **`PROBE_ENV`, from the shell only.** It points the demos at a different dotenv. The
     demos read it before loading any dotenv, so setting it inside `.env` has no effect.
 
@@ -82,8 +83,9 @@ in your Databricks workspace to set up the data for the Virtual Graph. The noteb
 - Builds the five base tables (`accounts`, `merchants`, `transactions`, `account_links`,
   `account_labels`) with their column comments and foreign keys.
 
-Set the catalog / schema / volume in the notebook's configuration cell; the defaults
-match the Finance Genie pipeline.
+Set the catalog, schema, and volume in the notebook's configuration cell. The defaults
+are `virtual-graph-dbx`, `vg-schema`, and `raw-data`. The catalog and schema match the
+fallbacks in `.env.sample`.
 
 ## Step 2: Build the Virtual Graph
 
@@ -103,12 +105,51 @@ uv run vg-demo                          # fraud demo (default): queries 1-10
 uv run vg-demo --demo basic             # exploration / visualization queries
 uv run vg-demo --demo fast-gds          # working PageRank path (7-day window)
 uv run vg-demo --demo gds-probe         # sweep property projections (7-day window)
-uv sync --extra history && uv run vg-demo --demo 100m       # zero-spill spike: query existing table, confirm from history
 ```
 
 Useful flags: `--rows N` caps printed rows per query. `--timeout S` sets the per-query
-server timeout, which defaults to 300s. `--query N` and `--only N M` pick specific fraud
-queries.
+server timeout, which defaults to 300s. `--rows 0` prints only the match count.
+`--query N` and `--only N M` pick specific fraud queries. They cannot be combined. Every
+demo exits 1 when a query, projection or statement fails, and a bad flag exits 2.
+A flag the chosen demo does not read prints a warning on stderr, such as
+`warning: --since-days has no effect with --demo basic`. The demo still runs.
+
+## Step 4: Run the `100m` demo on Databricks (optional)
+
+The `100m` demo works differently from the other four. It sends SQL straight to a
+Databricks SQL warehouse through the Databricks SDK. It never opens a Neo4j connection,
+so it needs no Aura instance, no Virtual Graph and no graph mapping. It runs the kind of
+aggregation SQL the Virtual Graph pushes down, against a 100M-row `account_links_large`
+table. It then reads warehouse query history to confirm that the warehouse never spills
+to disk.
+
+It needs the following:
+
+- **The `history` extra.** Run `uv sync --extra history` to install the Databricks SDK.
+- **A Databricks profile.** The profile must exist in `~/.databrickscfg` with working
+  credentials. Name it with `DATABRICKS_CONFIG_PROFILE` in `.env`, or pass `--profile`.
+  The `NEO4J_*` values are not used.
+- **A SQL warehouse you can use.** The default is the author's warehouse,
+  `b0fffb8e3255bf85`. Set `VG_BACKING_WAREHOUSE_ID` in the environment or in `.env` to
+  use your own, or pass `--warehouse <id>`. The flag wins over the setting.
+  `DATABRICKS_WAREHOUSE_ID` is not read.
+- **The `account_links_large` table.** The setup notebook does not create it. The demo
+  looks for it in `DATABRICKS_CATALOG` and `DATABRICKS_SCHEMA`. Build it once with
+  `--build`. The build reads the `accounts` table from Step 1 and generates random
+  transfers between those accounts. It needs permission to create a table in the schema.
+- **Warehouse time for the build.** `--build` rebuilds the table at seven ramp sizes, from
+  100K up to 100M rows, with a destructive `CREATE OR REPLACE`. Pass `--sizes 100000000`
+  to build only the final size.
+
+```bash
+uv sync --extra history
+uv run vg-demo --demo 100m --build --sizes 100000000   # first run: build the 100M-row table
+uv run vg-demo --demo 100m                             # later runs: query the existing table
+```
+
+A run waits up to a few minutes for query history to land before it prints the spill
+metrics. See [`100m` demo](#100m-demo) for the queries, the recorded metrics and every
+flag.
 
 ## Documents in this directory
 
@@ -127,10 +168,12 @@ queries.
 Counts, breakdowns, and small anchored traversals that show the value of the
 relationships without any fraud logic.
 
-- All queries run. Each one finishes in 0.5 to 1.4s.
+- All queries run. Each one finishes in 2s or less, and warm runs take 0.4 to 0.9s.
 - `graph` queries return nodes and relationships, so the CLI prints only a row count and
   timing. Paste them into the Aura Workspace Query tab to see the picture.
-- The demo prints the anchor account and merchant IDs it picked.
+- The demo anchors on account 17813 and merchant 1 and prints the IDs it used. If either
+  ID is missing, it falls back to the lowest account ID with an outgoing transfer or the
+  lowest merchant ID.
 - Queries 12-15 are pushdown demonstrations: UNION ALL becomes two pushed SQL
   statements, and a `LIMIT 25` pushes down at every depth (bounding the rows returned, not
   the join work behind them).
@@ -157,11 +200,13 @@ relationships without any fraud logic.
 
 `uv run vg-demo` runs fraud queries 1-10 from [`finding-fraud.md`](docs/finding-fraud.md)
 by default. Each query runs under the `--timeout` cap, which defaults to 300s. The whole
-run takes about 4 minutes.
+run takes about 20 seconds.
 
-- The queries group by scalar IDs.
-- Thresholds and top-N run in Cypher. A HAVING-style `WHERE` after an aggregating `WITH`
-  applies each threshold, and `ORDER BY` with `LIMIT` picks the top rows.
+- The queries group by scalar IDs, so each aggregation runs on Databricks as a pushed
+  `GROUP BY`. Query 9 is the exception, because it groups by day.
+- Thresholds and top-N run in Cypher. Each threshold sits in a second `WITH` after the
+  aggregating `WITH`, which keeps the `GROUP BY` pushed down. `ORDER BY` with `LIMIT`
+  picks the top rows.
 - Queries 1-6 and 8-10 return at most 50 rows each, and `--rows` caps how many print,
   10 by default.
 - Every fraud query sorts on a tie-breaking id, so its rows come back in the same order
@@ -171,8 +216,8 @@ run takes about 4 minutes.
   This split is needed because `OPTIONAL MATCH` is unsupported. Its `transfer_count >= 100`
   threshold runs in Cypher. Only the `merchant_count < 20` check runs client-side, after
   the join.
-- The rapid-turnover query returns its average turnaround as a Cypher Duration from
-  `duration.inSeconds`. The demo converts it to `avg_turnaround_hours`.
+- The rapid-turnover query computes its average turnaround in seconds from `toInteger()`
+  timestamp arithmetic. The demo converts it to `avg_turnaround_hours`.
 - Recent windows are passed as a precomputed `$since` parameter.
 - Any error is caught and printed so the run continues.
 
@@ -180,14 +225,14 @@ run takes about 4 minutes.
 |---|---|---|
 | 1 | Structuring: accounts with many transfers sized just under $10,000 | works, under 1s |
 | 2 | New accounts: the most recently opened accounts, ranked by outflow | works, under 1s |
-| 3 | Round trips: account pairs paying each other both ways (wash activity) | works, about 3-4s |
+| 3 | Round trips: account pairs paying each other both ways (wash activity) | works, about 1s |
 | 4 | Velocity ratio: accounts moving far more money than they hold | works, under 1s |
 | 5 | Collection accounts (fan-in): many distinct senders into one account | works, under 1s |
 | 6 | Spray accounts (fan-out): one account paying many distinct recipients | works, under 1s |
-| 7 | Courier accounts: heavy peer-to-peer transfers, little merchant spend | works, about 15s |
-| 8 | Pass-through mule (local betweenness proxy) | works, about 4-6s |
-| 9 | Shared-merchant burst (coordinated ring) | works, about 5s |
-| 10 | Rapid-turnover per account | works, about 210s |
+| 7 | Courier accounts: heavy peer-to-peer transfers, little merchant spend | works, about 4s |
+| 8 | Pass-through mule (local betweenness proxy) | works, about 1-2s |
+| 9 | Shared-merchant burst (coordinated ring) | works, about 5-9s |
+| 10 | Rapid-turnover per account | works, about 1s |
 
 Query 11, layering cycles, is not run. The demo prints "Not run" for it, because the
 Virtual Graph does not support it. Its quantified path `{2,4}` fails with `42NG1: Equijoin on the outer nodes of a quantified
@@ -215,10 +260,10 @@ A default run on the 7-day window looks like this:
 
 | Step | Time | Result |
 |---|---|---|
-| Size the window | about 3s | 23,198 edges |
-| Project, which provisions the session | 35 to 38s | 15,588 nodes and 23,198 relationships |
+| Size the window | under 1s warm, about 3s cold | 23,198 edges |
+| Project, which provisions the session | 34 to 38s | 15,588 nodes and 23,198 relationships |
 | Stream PageRank, top 10 | 2 to 3s | 10 rows |
-| Drop the projection | about 1s | graph dropped |
+| Drop the projection | 1 to 3s | graph dropped |
 
 Notes:
 
@@ -226,7 +271,8 @@ Notes:
   Provisioning alone took 31 to 44s across runs.
 - On a session conflict, the demo retries the projection once under a new name. Aura
   reports a conflict as a missing session or an existing graph mapping. Other projection
-  errors stop the run with a nonzero exit.
+  errors stop the run with a nonzero exit. After any projection failure, the demo first
+  tries to drop the graph.
 - Streamed `nodeId`s are GDS-internal IDs, not `account_id`s. The formula
   `account_id = (nodeId & (2^50 - 1)) >> 1` decodes them. The demo prints the decoded
   `account_id` next to each `nodeId` and score. See [`gds-guide.md`](gds-guide.md).
@@ -236,7 +282,8 @@ Notes:
 
 Flags:
 
-- `--count-only` counts the rows in a window for free.
+- `--count-only` counts the rows in a window with one warehouse query and provisions no
+  session.
 - `--since-hours` / `--since-days` scope the window.
 - `--limit` changes the top-N.
 - `--memory` sizes the session.
@@ -259,9 +306,9 @@ usable properties to GDS projections:
   account ID.
 - The demo sweeps projections on the default 7-day window, adding properties one at a
   time and reporting which project and which are skipped.
-- On the 7-day window, scenarios A to E each project in 34 to 46s. Weighted PageRank
+- On the 7-day window, scenarios A to E each project in 33 to 46s. Weighted PageRank
   works on the projected `amount`.
-- It first introspects the live schema and prints each property's type, then runs:
+- It first samples one row from the window and prints each property's type, then runs:
 
 | Scenario | Projection adds | Result |
 |---|---|---|
@@ -278,15 +325,16 @@ usable properties to GDS projections:
 - Project numeric columns or numeric conversions of temporal values. Leave string
   identifiers in the source graph. See the modeling note in
   [`gds-guide.md`](gds-guide.md).
-- `--count-only` introspects the schema without provisioning; `--since-hours` /
-  `--since-days` size the window.
+- `--count-only` sizes the window and samples one row without provisioning a session.
+- `--since-hours` and `--since-days` size the window.
 
 ### `100m` demo
 
 The "zero spill from 100K to 100M rows" finding, reproduced on the SQL side:
 
 - Unlike the other demos, this one talks SQL straight to the backing Databricks warehouse
-  via the Databricks SDK (not Cypher over Bolt), because the finding is the SQL-side spike.
+  via the Databricks SDK instead of Cypher over Bolt, because the finding is the SQL-side
+  spike.
 - It runs the C1/C2/C3 aggregation SQL the Virtual Graph pushes down to, directly against
   `account_links_large`. On the 100M-row table the C-queries take 0.9 to 4.5s of client
   wall time. The demo then reads
@@ -330,7 +378,8 @@ Flags:
 - `--build` first rebuilds `account_links_large` at each ramp size (100K, 250K, 500K, 1M,
   10M, 50M, 100M) with a destructive `CREATE OR REPLACE`.
 - `--sizes` picks specific ramp sizes.
-- `--skip-history` runs the C-queries but skips the history wait (spill left unconfirmed).
+- `--skip-history` runs the C-queries but skips the history wait, so spill stays
+  unconfirmed.
 - `--warehouse` overrides the warehouse.
 - `--profile` overrides the Databricks profile.
 - `--history-lag-minutes` sets the estimated history lag used for the countdown. The
@@ -340,8 +389,8 @@ Flags:
 
 ### Support scripts
 
-These standalone scripts probe and stress the Virtual Graph; they share the connection
-helper in `src/connection.py` (reads the project `.env`, or `PROBE_ENV` if set):
+These standalone scripts probe and stress the Virtual Graph. They share the connection
+helper in `src/connection.py`, which reads the project `.env`, or `PROBE_ENV` if set:
 
 - `vg-probe` (`src/probe.py`): run a single ad-hoc Cypher statement and time it
   (`uv run vg-probe "<cypher>"`). `uv run vg-probe --help` prints its usage. It runs the
@@ -369,26 +418,26 @@ The latest Virtual Graph update is a big step forward. We re-ran every demo, sup
 **Faster queries across the board**
 
 - A full scan of the 300,000-row transfer relationship now aggregates in 3.6s. It used to take 40 to 45s.
-- Grouping by a whole node now pushes down to Databricks. The structuring query runs in 1.1s, down from about 38s. The new-account velocity query runs in 1.3s, down from about 985s.
+- Grouping by a whole node is now fast. The structuring query runs in 1.1s, down from about 38s. The new-account velocity query runs in 1.3s, down from about 985s. A node group key still keeps the `GROUP BY` out of the SQL, so the graph engine does the grouping. The demo queries group by scalar ids, which push the `GROUP BY` down.
 - `count(DISTINCT ...)` is now fast. A 7-day window takes 2.0s, down from more than 5 minutes.
 - An unanchored four-hop traversal with `LIMIT 25` returns in 2.4s, down from about 14s.
-- Each of the 15 `basic` queries finishes in 0.4 to 1.7s.
+- Each of the 15 `basic` queries finishes in 0.4 to 2.0s.
 - The fraud visualization stars render in about 1s each, down from 9 to 10s.
 
 **TIMESTAMP results are no longer slow**
 
-- The engine no longer makes a `current_timezone()` round trip for each TIMESTAMP value. Warehouse query history shows zero such statements.
+- The engine no longer makes a `current_timezone()` round trip for each TIMESTAMP value. Warehouse query history still shows one `SELECT current_timezone()` of about 60ms after each query that returns TIMESTAMP columns. A 210,289-row result triggered only one.
 - Queries that return relationships or timestamp columns now come back in under 2s at 25 rows.
 
 **The slow fraud queries now finish**
 
-- The shared-merchant burst query (query 9) completes in about 5s. It used to exceed the 120s timeout.
-- The rapid-turnover query (query 10) completes in about 210s, inside the 300s default timeout. It used to run past 100s without finishing.
-- The pass-through mule query (query 8) runs in about 4 to 6s with its output column renamed.
+- The shared-merchant burst query (query 9) completes in 5 to 9s. It used to exceed the 120s timeout.
+- The rapid-turnover query (query 10) completes. It used to run past 100s without finishing. Its original form took about 210s. The pushed-down rewrite under **Project changes** takes about 1s.
+- The pass-through mule query (query 8) runs with its output column renamed. It takes 1 to 2s after the pushdown rewrite.
 
 **More Cypher runs on the server**
 
-- A HAVING-style `WHERE` on an aggregate alias now works, so threshold filters can stay in Cypher.
+- A HAVING-style `WHERE` on an aggregate alias now works, so threshold filters can stay in Cypher. On the aggregating `WITH` itself, it keeps the `GROUP BY` out of the SQL. In a second `WITH`, the `GROUP BY` pushes down.
 - `IS NULL`, `IS NOT NULL`, and `range()` now work.
 - Returning a node property alongside an aggregate of that node works.
 - Error messages are more specific. The engine now returns `42NG1` with a reason, such as `Aggregating WITH clause is not supported`.
@@ -418,13 +467,20 @@ The latest Virtual Graph update is a big step forward. We re-ran every demo, sup
 - The `timezone` demo was removed. The engine no longer makes the per-row `current_timezone()` round trip it measured.
 - The `vg-heavy` support script was removed.
 - The fraud demo now runs as one tier. `uv run vg-demo` runs queries 1-10, and the default `--timeout` is 300s.
-- Query 8, the pass-through mule, was fixed. It now uses a distinct output alias. It groups per incoming transfer first, adds a `forwarded_in` column, and counts each incoming transfer's dollars once in `volume`. It runs in about 4 to 6s.
-- Query 3 now counts real transfers and real dollars. The pattern matches once per pair of transfers, so the query counts each direction with `count(DISTINCT ...)` and divides each direction's sum by the other direction's count. The top pair is 7855 and 13727.
+- Query 8, the pass-through mule, was fixed. It now uses a distinct output alias. It groups per incoming transfer first, adds a `forwarded_in` column, and counts each incoming transfer's dollars once in `volume`.
+- Query 3 now counts real transfers and real dollars. The pattern matches once per pair of transfers, so the query counts each direction with `count(DISTINCT f.link_id)` and `count(DISTINCT g.link_id)`. It divides each direction's sum by the other direction's count. The top pair is 7855 and 13727.
 - Every fraud query and the `basic` breakdowns now sort on a tie-breaking id, so tied rows come back in a fixed order.
-- `basic` query 8 now returns the 25 most recent transfers, so it shows money in both directions. Query 11 now returns the path, so the relationships draw.
+- `basic` query 8 now returns the 25 most recent transfers, so it shows money in both directions. Queries 11, 14, and 15 now return paths, so the relationships draw.
+- `basic` queries 8 to 11, 13, and 14 now sort on ids, so they return the same rows on every run. Query 15 stays unsorted, because a sort on the four-hop pattern makes the warehouse build every chain before the `LIMIT` applies.
 - The `gds-probe` timestamp scenarios now project `toInteger(t.transfer_timestamp) * 1000`, bound in a `WITH`. This form raises no `01N52` warning. The sweep runs on the default 7-day window.
 - The `100m` demo now bypasses the warehouse result cache and reports a cached statement as "cached, not measured". It reads `.env` without exporting it, so the Databricks profile alone supplies the host and credentials.
-- Query 10 now returns its average turnaround as a Duration from `duration.inSeconds` and converts it to hours in Python. This form runs without the `01N52` unknown-property warning, and its values match Databricks SQL exactly.
+- Queries 3, 5, 6, 7, 8, and 10 were rewritten so their `GROUP BY` pushes down to Databricks. The rules come from the SQL each statement produced in `system.query.history`:
+  - Every group key is a scalar property. Query 8 groups on `t_in.link_id` instead of `t_in`, and query 10 groups on `mule.account_id` instead of `mule`.
+  - Every threshold sits in a second `WITH`, not on the aggregating `WITH`.
+  - Query 3 counts `count(DISTINCT f.link_id)` instead of `count(DISTINCT f)`.
+  - Query 10 computes its turnaround as `avg(toInteger(t_out.transfer_timestamp) - toInteger(t_in.transfer_timestamp))` in seconds instead of `avg(duration.inSeconds(...))`. The demo converts the seconds to hours in Python.
+- Each rewrite returns the same rows as the form it replaced. Query 10 went from 208s to about 1s. Query 7's transfer half went from about 11s to under 1s. Query 8 went from about 3.6s to about 1s. Query 3 went from about 2.2s to about 0.6s. The full fraud demo now takes about 20s.
+- Query 9 still groups by `date(t.txn_timestamp)`, so it does not push down. An epoch-day key pushes down but took about 35s, because the pushed `collect(DISTINCT ...)` arrays are slow to ingest.
 - Fraud thresholds and top-N now run in Cypher instead of Python.
 - The `fast-gds` demo now prints the decoded `account_id` next to each streamed `nodeId`.
 - The `fast-gds` demo now gives each default run a unique graph name, so a failed session never blocks the next run. On a session conflict it retries once under a new name.

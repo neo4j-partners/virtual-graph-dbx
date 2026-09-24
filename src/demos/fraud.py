@@ -1,8 +1,9 @@
 """Fraud demo (``--demo fraud``).
 
-The fraud-signal queries 1-10 from ``finding-fraud.md``. The server aggregates,
-applies each threshold (a ``WHERE`` after the aggregating ``WITH``), orders and limits;
-"recent" windows are passed as a precomputed ``$since`` parameter. Only the courier
+The fraud-signal queries 1-10 from ``finding-fraud.md``. Databricks runs each
+``GROUP BY``, and the Neo4j engine applies each threshold (a ``WHERE`` on a second
+``WITH``), orders and limits. "Recent" windows are passed as a precomputed ``$since``
+parameter. Only the courier
 query still merges two halves and filters here in Python. Query 11 is documented but
 unsupported on the Virtual Graph, so it is never run. See ``queries.py``.
 """
@@ -17,7 +18,7 @@ from neo4j import Driver
 from neo4j.exceptions import DriverError, Neo4jError
 from neo4j.time import Date, DateTime
 
-from helpers import data_max_dates, driver_error, print_table, run_cypher, since_param
+from helpers import data_max_dates, print_table, query_error, run_cypher, since_param
 from queries import QUERIES, Query, Row
 
 
@@ -36,14 +37,18 @@ def merge_enrichment(rows: list[Row], enrich_rows: list[Row], key: str,
 
 
 def run_query(driver: Driver, query: Query, max_rows: int, timeout: float,
-              max_transfer: DateTime, max_opened: Date) -> None:
-    """Execute one query, merge any enrichment, apply a client filter, and print."""
+              max_transfer: DateTime, max_opened: Date) -> bool:
+    """Execute one query, merge any enrichment, apply a client filter, and print.
+
+    Returns False when the query errored. An unsupported query is not run and counts
+    as a success.
+    """
     marker = "OK" if query.vg_supported else "unsupported"
     print(f"\n{'=' * 78}")
     print(f"[{query.number}] {query.title}  (Virtual Graph: {marker})")
     if not query.vg_supported:
         print(f"  Not run. {query.note}")
-        return
+        return True
     if query.note:
         print(f"  note: {query.note}")
     print("=" * 78)
@@ -59,13 +64,9 @@ def run_query(driver: Driver, query: Query, max_rows: int, timeout: float,
         if query.enrich_cypher is not None:
             enrich_rows = run_cypher(driver, query.enrich_cypher, {}, timeout)
             merge_enrichment(rows, enrich_rows, query.enrich_key, query.enrich_columns)
-    except Neo4jError as exc:
-        print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {exc.code}\n"
-              f"  {exc.message}")
-        return
-    except DriverError as exc:
-        print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {driver_error(exc)}")
-        return
+    except (Neo4jError, DriverError) as exc:
+        print(f"  ERROR after {time.perf_counter() - t0:.1f}s: {query_error(exc)}")
+        return False
     elapsed = time.perf_counter() - t0
     if query.row_transform is not None:
         for row in rows:
@@ -73,16 +74,21 @@ def run_query(driver: Driver, query: Query, max_rows: int, timeout: float,
 
     if query.client_filter is None:
         matched = rows
-        print(f"  OK {elapsed:.1f}s; {len(matched)} row(s)")
+        print(f"  OK {elapsed:.1f}s, {len(matched)} row(s)")
     else:
         matched = [r for r in rows if query.client_filter(r)]
-        print(f"  OK {elapsed:.1f}s; {len(rows)} server row(s); "
+        print(f"  OK {elapsed:.1f}s, {len(rows)} server row(s), "
               f"{len(matched)} pass the client-side threshold")
     print_table(matched[: max_rows], max_rows, total_matched=len(matched))
+    return True
 
 
 def select_queries(args: argparse.Namespace) -> list[Query]:
-    """Resolve which fraud queries to run from the CLI flags."""
+    """Resolve which fraud queries to run from the CLI flags.
+
+    The CLI makes ``--query`` and ``--only`` mutually exclusive. If both are set
+    anyway, ``--only`` wins.
+    """
     by_number = {q.number: q for q in QUERIES}
     if args.only:
         missing = [n for n in args.only if n not in by_number]
@@ -97,12 +103,23 @@ def select_queries(args: argparse.Namespace) -> list[Query]:
     return [q for q in QUERIES if q.vg_supported]
 
 
-def run_fraud(driver: Driver, args: argparse.Namespace) -> None:
-    """Run the selected fraud-signal queries."""
-    selected = select_queries(args)
+def run_fraud(driver: Driver, args: argparse.Namespace,
+              selected: list[Query] | None = None) -> bool:
+    """Run the selected fraud-signal queries.
+
+    ``selected`` lets the CLI resolve the query numbers before it connects. Returns
+    True only when every query that ran succeeded.
+    """
+    if selected is None:
+        selected = select_queries(args)
     max_transfer, max_opened = data_max_dates(driver)
     print(f"Connected. Data max transfer={max_transfer}, max opened={max_opened}.")
     print(f"Running {len(selected)} quer{'y' if len(selected) == 1 else 'ies'} "
           f"(timeout {args.timeout:g}s each).")
-    for query in selected:
-        run_query(driver, query, args.rows, args.timeout, max_transfer, max_opened)
+    failed = [query.number for query in selected
+              if not run_query(driver, query, args.rows, args.timeout,
+                               max_transfer, max_opened)]
+    if failed:
+        print(f"\n{len(failed)} quer{'y' if len(failed) == 1 else 'ies'} failed: "
+              f"{', '.join(map(str, failed))}")
+    return not failed

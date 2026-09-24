@@ -2,9 +2,9 @@
 
 This walkthrough shows how the Finance Genie Virtual Graph finds money laundering. It
 covers fraud queries 1 to 10, the same set `uv run vg-demo --demo fraud` runs. Every query
-below has been tested on the Virtual Graph. Most come back in a few seconds. Query 7 takes
-about 15 seconds. Query 10 is the slowest and takes about three and a half minutes. Copy
-and paste each one as written.
+below has been tested on the Virtual Graph. Most come back in about a second. Query 7
+takes about 4 seconds, and query 9 takes 5 to 9 seconds. Copy and paste each one as
+written.
 
 ## Overview of the Data
 
@@ -126,13 +126,13 @@ the query finds the newest accounts in the data, each already over a year old.
 Ordinary trade rarely sends the same money back and forth. Two accounts that keep paying
 each other are likely "washing" money to create fake activity. This finds pairs of
 accounts that send money in both directions and totals the money that moved between
-them. Runs in three to four seconds.
+them. Runs in about a second.
 
 ```cypher
 MATCH (a:Account)-[f:TRANSFERRED_TO]->(b:Account)-[g:TRANSFERRED_TO]->(a)
 WHERE a.account_id < b.account_id
 WITH a.account_id AS a_id, b.account_id AS b_id,
-     count(DISTINCT f) AS n_ab, count(DISTINCT g) AS n_ba,
+     count(DISTINCT f.link_id) AS n_ab, count(DISTINCT g.link_id) AS n_ba,
      sum(f.amount) AS sf, sum(g.amount) AS sg
 RETURN a_id, b_id,
        round(sf / n_ba + sg / n_ab, 2) AS round_trip_volume,
@@ -152,7 +152,7 @@ columns:
 
 The pattern matches once for every combination of one transfer each way. A pair with 4
 transfers one way and 5 back produces 20 matches. The query therefore counts each
-direction with `count(DISTINCT ...)` and divides each direction's sum by the other
+direction with `count(DISTINCT f.link_id)` and `count(DISTINCT g.link_id)`. It divides each direction's sum by the other
 direction's count. That gives the real transfer count and the real dollars.
 
 The top pair is 7855 and 13727, with one transfer each way totaling $122,721.78. This is
@@ -200,6 +200,7 @@ MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
 WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
 WITH dst.account_id AS recipient, count(DISTINCT src.account_id) AS senders,
      count(t) AS transfers, round(sum(t.amount), 2) AS inflow
+WITH recipient, senders, transfers, inflow
 WHERE senders >= 5
 RETURN recipient AS account_id, senders, transfers, inflow
 ORDER BY senders DESC, account_id ASC
@@ -225,6 +226,7 @@ MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
 WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
 WITH src.account_id AS sender, count(DISTINCT dst.account_id) AS recipients,
      count(t) AS transfers, round(sum(t.amount), 2) AS outflow
+WITH sender, recipients, transfers, outflow
 WHERE recipients >= 5
 RETURN sender AS account_id, recipients, transfers, outflow
 ORDER BY recipients DESC, account_id ASC
@@ -250,12 +252,13 @@ A real customer both moves money to people and buys from shops. An account with 
 peer-to-peer transfer activity and little merchant spend behaves like a courier. This
 takes two queries. The first counts each account's transfers in
 both directions. It keeps the accounts with 100 or more. The second counts each account's
-merchant purchases. Together they run in about 15 seconds, and the first query takes
-about 11 of them.
+merchant purchases. Together they run in about 4 seconds, and the second query takes
+most of that.
 
 ```cypher
 MATCH (a:Account)-[tr:TRANSFERRED_TO]-(:Account)
 WITH a.account_id AS account_id, count(tr) AS transfer_count
+WITH account_id, transfer_count
 WHERE transfer_count >= 100
 RETURN account_id, transfer_count
 ORDER BY transfer_count DESC, account_id ASC
@@ -308,7 +311,7 @@ the relay pattern on accounts the earlier queries already flagged.
 A mule account receives money and passes almost the same amount on to someone else. This
 query finds every account that received a transfer and then sent one of nearly the same
 size, within 5%, to a different account. The outgoing transfer can happen at the same time
-as the incoming one or later. Runs in four to six seconds.
+as the incoming one or later. Runs in one to two seconds.
 
 ```cypher
 MATCH (a:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)
@@ -316,11 +319,12 @@ MATCH (a:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)
 WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
   AND abs(t_out.amount - t_in.amount) <= 0.05 * t_in.amount
   AND a <> b
-WITH mule.account_id AS mule_id, t_in, count(*) AS outs
+WITH mule.account_id AS mule_id, t_in.link_id AS in_link, t_in.amount AS in_amount,
+     count(*) AS outs
 RETURN mule_id,
-       sum(outs)                  AS passthroughs,
-       count(t_in)                AS forwarded_in,
-       round(sum(t_in.amount), 2) AS volume
+       sum(outs)                 AS passthroughs,
+       count(in_link)            AS forwarded_in,
+       round(sum(in_amount), 2)  AS volume
 ORDER BY passthroughs DESC, mule_id ASC
 LIMIT 50
 ```
@@ -336,8 +340,10 @@ is one account:
 * `volume`: the dollars that came in on those forwarded transfers, each transfer counted
   once.
 
-The first `WITH` groups by mule and incoming transfer, so each incoming transfer is
-counted once in `forwarded_in` and `volume`. The top row is 13914, with 599 pass-throughs
+The first `WITH` groups by mule and by the incoming transfer's `link_id`, so each
+incoming transfer is counted once in `forwarded_in` and `volume`. It groups on the id
+rather than on `t_in` itself, because a relationship used as a group key keeps the
+aggregation from running on Databricks. The top row is 13914, with 599 pass-throughs
 built from 190 incoming transfers worth $46,634.25.
 
 In this sample the query surfaces high-volume hubs. None of its top 50 accounts is labeled
@@ -349,15 +355,16 @@ accounts. An `account_id` alias would be ambiguous in the SQL the Virtual Graph 
 and the query would fail.
 
 The textbook form of this query also requires the money to go out within 48 hours. The
-Virtual Graph cannot add a duration to a timestamp inside `WHERE`, so this version keeps
-only the "out after in" ordering.
+Virtual Graph cannot add a duration to a timestamp inside `WHERE`. A window written as
+`toInteger(t_out.transfer_timestamp) - toInteger(t_in.transfer_timestamp) < 172800` does
+run. This version keeps only the "out after in" ordering, so its results match the demo.
 
 #### 9. Shared-merchant burst: many accounts, one shop, one day
 
 Fraud rings often test stolen cards or cash out at the same small merchant on the same
 day. This query groups purchases by merchant and by day and collects the different
 accounts that bought there. It keeps the days where four or more accounts showed up at a
-merchant. Runs in about 5 seconds.
+merchant. Runs in 5 to 9 seconds.
 
 ```cypher
 MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
@@ -394,22 +401,23 @@ in and one transfer out to a different account. The transfer out happens at the 
 as the transfer in or later. The query keeps the accounts with 50 or more such pairs and
 reports the average time between receiving and forwarding.
 
-This is the slowest query in the set. It joins every transfer into an account to every
-transfer out of it at the same time or later. No time window or anchor narrows the join.
-It takes about 210
-seconds, or three and a half minutes. That fits inside the demo's 300-second timeout.
+The query joins every transfer into an account to every transfer out of it at the same
+time or later. No time window or anchor narrows the join, so it matches about 11 million
+pairs. The counting and averaging run on Databricks, which returns one row per account.
+It takes about a second.
 
 ```cypher
 MATCH (src:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)
       -[t_out:TRANSFERRED_TO]->(dst:Account)
 WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
   AND src <> dst
-WITH mule,
+WITH mule.account_id AS mule_id,
      count(*) AS rapid_pairs,
-     avg(duration.inSeconds(t_in.transfer_timestamp,
-                            t_out.transfer_timestamp)) AS avg_turnaround
+     avg(toInteger(t_out.transfer_timestamp)
+         - toInteger(t_in.transfer_timestamp)) AS avg_turnaround_s
+WITH mule_id, rapid_pairs, avg_turnaround_s
 WHERE rapid_pairs >= 50
-RETURN mule.account_id AS account_id, rapid_pairs, avg_turnaround
+RETURN mule_id AS account_id, rapid_pairs, avg_turnaround_s
 ORDER BY rapid_pairs DESC, account_id ASC
 LIMIT 50
 ```
@@ -419,18 +427,20 @@ A short turnaround makes the signal stronger. Each row is one account:
 
 * `account_id`: the account in the middle.
 * `rapid_pairs`: how many receive-then-forward pairs it took part in.
-* `avg_turnaround`: the average time between receiving money and sending money on, as a
-  Cypher Duration.
+* `avg_turnaround_s`: the average time between receiving money and sending money on, in
+  seconds.
 
-The query returns the turnaround as a Duration because `duration.inSeconds` measures the
-gap between the two timestamps exactly. The demo converts the Duration to hours on the
-client and prints it as `avg_turnaround_hours`. The values match the same calculation run
-directly in Databricks SQL. Reading `.epochMillis` off the timestamps returns the same
-values, but the server flags it with an `01N52` unknown-property warning.
+`toInteger()` turns each timestamp into epoch seconds, and Databricks computes the
+average. The demo converts the seconds to hours on the client and prints them as
+`avg_turnaround_hours`. `avg(duration.inSeconds(...))` returns the same hours, but it keeps
+the aggregation in the graph engine. That form took about 208 seconds. Reading
+`.epochMillis` off the timestamps raises an `01N52` unknown-property warning.
 
 The textbook form also limits each pair to 24 hours. The Virtual Graph cannot add a
-duration to a timestamp inside `WHERE`, so this version averages over every
-forward-after-receive pair. The word "rapid" in the name describes the intent. The query
+duration to a timestamp inside `WHERE`. Adding
+`AND toInteger(t_out.transfer_timestamp) - toInteger(t_in.transfer_timestamp) < 86400`
+does run, in about 1.6 seconds. It changes the results, so this version averages over
+every forward-after-receive pair to match the demo. The word "rapid" in the name describes the intent. The query
 itself enforces no time limit. In this sample
 the top 50 accounts average 29 to 32 days between receiving and forwarding. The top row is
 13914, with 33,229 pairs and an average of 756.8 hours.

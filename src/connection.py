@@ -2,7 +2,7 @@
 
 Every script here (``cli.py`` and the support scripts) reads the same Aura
 credentials from the project ``.env`` at the repository root. Set ``PROBE_ENV`` to
-point at a different dotenv; ``probe.py`` and ``viz_check.py`` use that for ad-hoc
+point at a different dotenv. ``probe.py`` and ``viz_check.py`` use that for ad-hoc
 targets.
 """
 
@@ -19,8 +19,9 @@ PROJECT_ENV = Path(__file__).resolve().parents[1] / ".env"
 
 # The SQL warehouse behind the Virtual Graph ("vg demo sql warehouse"), used by the
 # 100m demo. It is the warehouse the warehouse-performance tests ran on, and the one
-# the `account_links_large` table lives on. The project ``.env`` carries a different
-# (app/analyst) warehouse id, so this is the default rather than the env value.
+# the `account_links_large` table lives on. Override it with VG_BACKING_WAREHOUSE_ID
+# in the shell or the project ``.env``. DATABRICKS_WAREHOUSE_ID is deliberately not
+# read, because the project ``.env`` uses it for a different (app/analyst) warehouse.
 VG_BACKING_WAREHOUSE = "b0fffb8e3255bf85"
 
 
@@ -41,16 +42,18 @@ class DatabricksConfig:
     profile: str
     catalog: str
     schema: str
+    warehouse: str = VG_BACKING_WAREHOUSE
 
 
 def load_databricks_config(env_file: Path | None = None) -> DatabricksConfig:
-    """Read the Databricks profile and Unity Catalog defaults from the project ``.env``.
+    """Read the Databricks profile, Unity Catalog location and warehouse from ``.env``.
 
     The 100m demo talks SQL to the warehouse via the Databricks SDK
-    (``WorkspaceClient``) rather than Bolt, so it needs the config profile and the
-    catalog/schema that hold ``account_links_large``. The warehouse id is not read
-    from here on purpose: the backing VG warehouse (``VG_BACKING_WAREHOUSE``) is the
-    one that runs the test, and the env file's warehouse points elsewhere.
+    (``WorkspaceClient``) rather than Bolt, so it needs the config profile, the
+    catalog/schema that hold ``account_links_large``, and the warehouse to run on. The
+    warehouse comes from ``VG_BACKING_WAREHOUSE_ID``, else ``VG_BACKING_WAREHOUSE``.
+    ``DATABRICKS_WAREHOUSE_ID`` is not read, because the env file's warehouse points
+    elsewhere.
 
     The dotenv is read without exporting it into ``os.environ``. The SDK resolves
     environment variables before the profile file, so an exported ``DATABRICKS_HOST``,
@@ -63,10 +66,12 @@ def load_databricks_config(env_file: Path | None = None) -> DatabricksConfig:
     profile = (env.get("DATABRICKS_CONFIG_PROFILE")
                or env.get("DATABRICKS_PROFILE") or "DEFAULT")
     catalog = (env.get("DATABRICKS_CATALOG")
-               or env.get("CATALOG") or "graph-on-databricks")
+               or env.get("CATALOG") or "virtual-graph-dbx")
     schema = (env.get("DATABRICKS_SCHEMA")
-              or env.get("SCHEMA") or "graph-enriched-schema")
-    return DatabricksConfig(profile=profile, catalog=catalog, schema=schema)
+              or env.get("SCHEMA") or "vg-schema")
+    warehouse = env.get("VG_BACKING_WAREHOUSE_ID") or VG_BACKING_WAREHOUSE
+    return DatabricksConfig(profile=profile, catalog=catalog, schema=schema,
+                            warehouse=warehouse)
 
 
 def load_connection(env_file: Path | None = None) -> tuple[str, tuple[str, str]]:

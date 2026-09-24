@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-from uuid import uuid4
 
 from neo4j import GraphDatabase
-from neo4j.exceptions import DriverError, Neo4jError
 
 from connection import load_connection
-from demos.gds_common import DROP_GRAPH, run_statement
+from demos.gds_common import (
+    DROP_GRAPH,
+    new_graph_name,
+    project_with_cleanup,
+    run_statement,
+)
 from helpers import data_max_dates
 
 COUNT_WINDOW = """
@@ -59,19 +62,6 @@ def decode_account_id(node_id: int) -> int:
     return (node_id & _NODE_ID_LOW_BITS) >> 1
 
 
-def _new_graph_name() -> str:
-    return f"{_DEFAULT_GRAPH}_{uuid4().hex[:12]}"
-
-
-def _retryable_projection_error(exc: Neo4jError) -> bool:
-    """Recognize Aura session startup failures that need a fresh graph name."""
-    message = exc.message or ""
-    return ("SessionId[" in message and "not found" in message) or (
-        "status code 409" in message and "graph mapping" in message
-        and "already exists" in message
-    )
-
-
 def run_gds(args: argparse.Namespace) -> bool:
     """Provision a GDS Session over a windowed transfer subgraph and stream PageRank."""
     uri, auth = load_connection()
@@ -81,10 +71,11 @@ def run_gds(args: argparse.Namespace) -> bool:
         driver.verify_connectivity()
 
         # Step 0: find the window cutoff from the dataset's max transfer timestamp
-        # (a cheap max() scan). The data ends in the past, so anchor to its max, not now.
-        # --since-hours, when set, overrides --since-days for a thin sub-day slice. The
-        # cutoff is computed here and passed as $since, so the WHERE stays a plain
-        # `>= $since` comparison (the Virtual Graph cannot do temporal arithmetic).
+        # (a cheap max() scan). The data ends in the past, so anchor to its max, not
+        # now. --since-hours, when set, overrides --since-days for a thin sub-day
+        # slice. The cutoff is computed here and passed as $since, so the WHERE stays a
+        # plain `>= $since` comparison (the Virtual Graph cannot do temporal
+        # arithmetic).
         if args.since_hours is not None:
             window = dt.timedelta(hours=args.since_hours)
             window_label = f"last {args.since_hours}h"
@@ -93,7 +84,7 @@ def run_gds(args: argparse.Namespace) -> bool:
             window_label = f"last {args.since_days}d"
         max_transfer, _ = data_max_dates(driver)
         since = max_transfer.to_native() - window
-        graph = args.graph if args.graph is not None else _new_graph_name()
+        graph = args.graph if args.graph is not None else new_graph_name(_DEFAULT_GRAPH)
         print(f"Connected. Window: {window_label}, "
               f"transfer_timestamp >= {since} (data max {max_transfer.to_native()}).")
         print(f"Target graph '{graph}', memory={args.memory}.")
@@ -106,10 +97,12 @@ def run_gds(args: argparse.Namespace) -> bool:
         edges = sized[0]["edges"]
         print(f"  -> {edges} TRANSFERRED_TO edge(s) in the window will be projected.")
         if edges == 0:
-            print("\nWindow is empty; widen --since-hours/--since-days. Not provisioning a session.")
+            print("\nWindow is empty; widen --since-hours/--since-days. "
+                  "Not provisioning a session.")
             return True
         if args.count_only:
-            print("\n--count-only set; sized the window without provisioning a session.")
+            print("\n--count-only set; sized the window without provisioning "
+                  "a session.")
             return True
 
         # An explicitly named graph retains the old replace-on-run behavior. Default
@@ -121,30 +114,17 @@ def run_gds(args: argparse.Namespace) -> bool:
                 return False
 
         # Projection provisions the GDS session. A session startup race can leave a
-        # graph mapping behind even when the projection failed, so retry with a new
-        # name only for the observed session/mapping failures.
-        projected = None
-        for attempt in range(2):
-            try:
-                projected = run_statement(
-                    driver,
-                    f"project '{graph}' from the window (provisions the session)",
-                    PROJECT_WINDOW,
-                    {"graph": graph, "memory": args.memory, "since": since},
-                    raise_on_error=True,
-                )
-                break
-            except Neo4jError as exc:
-                if args.graph is None and _retryable_projection_error(exc):
-                    run_statement(driver, f"clean up failed projection '{graph}'",
-                                  DROP_GRAPH, {"graph": graph})
-                    if attempt == 0:
-                        graph = _new_graph_name()
-                        print(f"  Retrying projection once as '{graph}'.")
-                        continue
-                break
-            except DriverError:
-                break
+        # graph mapping behind even when the projection failed, so every failure drops
+        # the name it used. Default runs retry once under a new name on the observed
+        # session/mapping failures.
+        projected, graph = project_with_cleanup(
+            driver,
+            "project from the window (provisions the session)",
+            PROJECT_WINDOW,
+            {"memory": args.memory, "since": since},
+            graph,
+            retry_prefix=_DEFAULT_GRAPH if args.graph is None else None,
+        )
         if projected is None:
             print("\nProjection failed; cannot run PageRank. See the error above.")
             return False
@@ -168,7 +148,8 @@ def run_gds(args: argparse.Namespace) -> bool:
                 print("  --------------------  ----------  ----------")
                 for row in ranked:
                     account_id = decode_account_id(row["nodeId"])
-                    print(f"  {row['nodeId']!s:<20}  {account_id!s:<10}  {row['score']:.6f}")
+                    print(f"  {row['nodeId']!s:<20}  {account_id!s:<10}  "
+                          f"{row['score']:.6f}")
         finally:
             # Keep a successful graph only when requested. Clean up failed streams.
             if args.keep and ranked is not None:

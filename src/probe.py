@@ -12,18 +12,21 @@ Keep this for quick checks and run heavy queries (for example the unanchored Que
     uv run vg-probe "RETURN 1 AS ok"
     uv run vg-probe --help
 
-Reads the project ``.env`` at the repository root by default; set ``PROBE_ENV`` to
-point at another dotenv.
+Reads the project ``.env`` at the repository root by default. Set ``PROBE_ENV`` to
+point at another dotenv. A Cypher or driver error prints one line and exits 1.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 
 from neo4j import GraphDatabase
+from neo4j.exceptions import DriverError, Neo4jError
 
 from connection import load_connection
+from helpers import query_error
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,7 +45,11 @@ def main() -> None:
         driver.verify_connectivity()
         print(f"connected: {uri}", flush=True)
         t0 = time.perf_counter()
-        recs, _, _ = driver.execute_query(cypher)
+        try:
+            recs, _, _ = driver.execute_query(cypher)
+        except (Neo4jError, DriverError) as exc:
+            sys.exit(f"ERROR after {time.perf_counter() - t0:.1f}s: "
+                     f"{query_error(exc, indent='')}")
         elapsed = time.perf_counter() - t0
         sample = recs[0].data() if recs else None
         print(f"OK {elapsed:.1f}s rows={len(recs)} sample={sample}", flush=True)
