@@ -138,13 +138,13 @@ The property `sourceNode.accountHash` contained a value of type `String`, which 
 ```
 
 So `relationshipProperties: { amount: t.amount }` projects and is usable as a
-`relationshipWeightProperty`. For time, convert the timestamp to epoch milliseconds in a
-`WITH` before the projection:
+`relationshipWeightProperty`. For time, convert the integer `transferEpochSeconds`
+property to epoch milliseconds in a `WITH` before the projection:
 
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
 WHERE t.transferTimestamp >= $since
-WITH src, dst, t, toInteger(t.transferTimestamp) * 1000 AS transferTimestampMs
+WITH src, dst, t, t.transferEpochSeconds * 1000 AS transferTimestampMs
 RETURN gds.graph.project(
   $graph,
   src,
@@ -157,13 +157,15 @@ RETURN gds.graph.project(
 ) AS result
 ```
 
-The Virtual Graph pushes `toInteger()` on a timestamp down to SQL as epoch seconds, and
-the form raises no warning. Every transfer timestamp is a whole second, so `* 1000` gives
-the same values as `epochMillis`. Reading `.epochMillis` off the property returns those
-values too, but the server flags it with the `01N52` unknown-property warning. The
-conversion has to go through the `WITH`, because `toInteger()` on a timestamp inside the
-config map fails with `22N38`. Stock Cypher rejects `toInteger()` on a timestamp, so this
-form is specific to the Virtual Graph. Keep string identifiers such as
+`transferEpochSeconds` maps the BIGINT `transfer_epoch_seconds` column, which holds each
+transfer's timestamp as Unix epoch seconds. Every transfer timestamp is a whole second, so
+`* 1000` gives the same values as `epochMillis`. Reading `.epochMillis` off the timestamp
+property returns those values too, but the server flags it with the `01N52`
+unknown-property warning. `toInteger(t.transferTimestamp)` pushes down on Databricks, but
+it fails on S3 Tables. There, DuckDB rejects the timestamp-to-`BIGINT` cast with `50NG0`.
+The conversion has to go through the `WITH`, because an expression inside the config map
+runs in the engine. On Databricks, `toInteger()` on a timestamp inside the config map
+failed with `22N38`. Keep string identifiers such as
 `accountHash` outside the GDS projection and join them to streamed account IDs in the
 application when needed. The `gds-probe` demo (`src/demos/gds_probe.py`, run with
 `uv run vg-demo --demo gds-probe`) projects the supported numeric values and skips

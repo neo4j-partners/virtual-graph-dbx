@@ -70,14 +70,13 @@ ORDER BY score DESC
 LIMIT 5
 """
 
-# Epoch milliseconds for the timestamp scenarios. `.epochMillis` on the relationship
-# property returns the right values but raises 01N52 (unknown property key
-# `epochMillis`). toInteger() on the timestamp pushes down to SQL as epoch seconds with
-# no warning, but only as a plain column: inside the config map it is evaluated
-# engine-side and rejected (22N38), so it is bound in a WITH first. Every
-# account_links timestamp is a whole second, so `* 1000` matches epochMillis exactly.
+# Epoch milliseconds for the timestamp scenarios, from the integer
+# transferEpochSeconds property. `.epochMillis` on the timestamp returns the right
+# values but raises 01N52 (unknown property key `epochMillis`). toInteger() on the
+# timestamp becomes a SQL cast that DuckDB rejects on S3 Tables. The value is bound in
+# a WITH first, because an expression inside the config map is evaluated engine-side.
 TIMESTAMP_MS_WITH = (
-    "WITH src, dst, t, toInteger(t.transferTimestamp) * 1000 AS transferTimestampMs"
+    "WITH src, dst, t, t.transferEpochSeconds * 1000 AS transferTimestampMs"
 )
 
 # The label/type-only base every scenario starts from (the known-good fast-gds shape).

@@ -42,8 +42,8 @@ Cypher query will not run.
   **Generate from schema** names labels after the tables, so rename them in the Aura model
   as described in section 3 of [`vg-model.md`](vg-model.md#3-define-your-schema). Every query in this
   project uses `:Account` and `:Merchant`.
-  - `TRANSFERRED_TO` (`:Account` → `:Account`): `amount`, `transferTimestamp`, `linkId`.
-  - `TRANSACTED_WITH` (`:Account` → `:Merchant`): `amount`, `txnTimestamp`, `txnHour`, `txnId`.
+  - `TRANSFERRED_TO` (`:Account` → `:Account`): `amount`, `transferTimestamp`, `transferEpochSeconds`, `linkId`.
+  - `TRANSACTED_WITH` (`:Account` → `:Merchant`): `amount`, `txnTimestamp`, `txnHour`, `txnEpochSeconds`, `txnId`.
 
 Query shape is the first thing to get right. The timings in this guide were measured on
 2026-09-23. The absolute seconds for any given query also depend on the warehouse size and
@@ -132,11 +132,13 @@ carries `tIn.amount` as an extra key, instead of grouping on `tIn`. That change 
 from 210,289 raw rows to 98,474 groups, and from about 3.6s to about 1s.
 
 Query 9 is the one exception in the demo. It groups on `date(t.txnTimestamp)`, which does
-not push down, so it ships all 250,000 purchases and runs in 5 to 9s. An epoch-day key,
-`toInteger(t.txnTimestamp) / 86400`, does push down. It returns 208,127 groups, but it
-takes about 35s. The engine ingests the arrays from `collect(DISTINCT ...)` slowly, so a
-pushed `collect` over many groups can cost more than the raw rows. Time both forms when a
-query collects.
+not push down, so it ships all 250,000 purchases. It runs in 5 to 9s on Databricks and
+about 172s on S3 Tables. On Databricks, an
+epoch-day key written as `toInteger(t.txnTimestamp) / 86400` does push down. It returns
+208,127 groups, but it takes about 35s. The engine ingests the arrays from
+`collect(DISTINCT ...)` slowly, so a pushed `collect` over many groups can cost more than
+the raw rows. Time both forms when a query collects. `toInteger()` on a timestamp fails on
+S3 Tables. The portable epoch-day key is `t.txnEpochSeconds / 86400`.
 
 ### Pattern 2: count distinct values on the server
 
@@ -366,30 +368,36 @@ follow from the patterns above.
   makes a good anchor. The demo cutoff `2024-03-23T23:58:00Z` is that maximum minus 7
   days. The `openedDate` series ends 2022-12-06, so the new-account window uses
   `2022-11-06`, that maximum minus 30 days.
-- **Write a multi-hop time window with `toInteger()`.** Timestamp-plus-duration
+- **Do time arithmetic on an integer epoch column.** Each edge table carries a BIGINT
+  epoch-seconds copy of its timestamp. The model maps `transfer_epoch_seconds` to
+  `transferEpochSeconds` and `txn_epoch_seconds` to `txnEpochSeconds`. Arithmetic on a
+  plain numeric column pushes down on both backends. `toInteger()` on a timestamp pushes
+  down on Databricks, but it fails on S3 Tables. There, Aura reads Iceberg through
+  embedded DuckDB. The cast becomes `CAST AS BIGINT`, and DuckDB rejects it with `50NG0
+  Conversion Error: Unimplemented type for cast`. `toFloat()` fails the same way. Keep the
+  timestamp properties for comparisons and display.
+- **Write a multi-hop time window on the epoch column.** Timestamp-plus-duration
   comparisons across relationships are unsupported in `WHERE`, and so are
-  `duration.inSeconds()` and `duration.between()`. `toInteger()` on a timestamp returns
-  epoch seconds and works in `WHERE`, so a 24-hour upper bound is
-  `toInteger(tOut.transferTimestamp) - toInteger(tIn.transferTimestamp) < 86400`. Keep
-  the plain ordering `tOut.transferTimestamp >= tIn.transferTimestamp` alongside it. On
-  account 7855 this filter returns 148 of 6,458 ordered transfer pairs, which matches the gap
-  computed client-side.
-- **Compute time gaps with `toInteger()`.** `toInteger()` on a timestamp pushes down to
-  SQL as a cast to epoch seconds. `avg(toInteger(tOut.transferTimestamp) -
-  toInteger(tIn.transferTimestamp))` therefore pushes down with its `GROUP BY`.
-  `avg(duration.inSeconds(...))` runs, but it keeps the `GROUP BY` out of the SQL. Reading
-  `.epochMillis` off a timestamp property raises the `01N52` unknown-property warning.
-  Query 10 uses the `toInteger()` form and converts the seconds to hours client-side. The
-  cast drops sub-second parts. Every transfer timestamp in this data is a whole second, so
-  the averages match `duration.inSeconds` to within 4e-8 seconds.
-- **Project timestamps into GDS with `toInteger()` in a `WITH`.** A GDS projection needs a
-  numeric timestamp. Bind it first with
-  `WITH src, dst, t, toInteger(t.transferTimestamp) * 1000 AS transferTimestampMs`,
-  then pass `transferTimestampMs` in `relationshipProperties`. The Virtual Graph pushes
-  `toInteger()` on a timestamp down to SQL as epoch seconds and raises no warning. Every
-  transfer timestamp is a whole second, so the values equal `epochMillis` exactly. The
-  same call inside the projection's config map fails with `22N38`. Stock Cypher rejects
-  `toInteger()` on a timestamp, so this form works only on the Virtual Graph. See
+  `duration.inSeconds()` and `duration.between()`. A 24-hour upper bound is
+  `tOut.transferEpochSeconds - tIn.transferEpochSeconds < 86400`. Keep the plain ordering
+  `tOut.transferTimestamp >= tIn.transferTimestamp` alongside it. On Databricks, the
+  `toInteger()` form of this filter returned 148 of 6,458 ordered transfer pairs on
+  account 7855. That count matched the gap computed client-side.
+- **Compute time gaps on the epoch column.**
+  `avg(tOut.transferEpochSeconds - tIn.transferEpochSeconds)` is plain integer arithmetic,
+  so it pushes down with its `GROUP BY`. `avg(duration.inSeconds(...))` returns correct
+  values, but it runs in the engine and keeps the `GROUP BY` out of the SQL. Reading
+  `.epochMillis` or `.epochSeconds` off a timestamp property raises the `01N52`
+  unknown-property warning. Query 10 uses the epoch-column form and converts the seconds
+  to hours client-side. Every transfer timestamp in this data is a whole second, so the
+  epoch column loses nothing.
+- **Project timestamps into GDS from the epoch column in a `WITH`.** A GDS projection
+  needs a numeric timestamp. Bind it first with
+  `WITH src, dst, t, t.transferEpochSeconds * 1000 AS transferTimestampMs`, then pass
+  `transferTimestampMs` in `relationshipProperties`. Every transfer timestamp is a whole
+  second, so the values equal `epochMillis`. An expression inside the projection's config
+  map runs in the engine, so bind the value in the `WITH`. On Databricks,
+  `toInteger(t.transferTimestamp)` inside the config map failed with `22N38`. See
   [`gds-guide.md`](gds-guide.md).
 - **Move node-property predicates to a leading `WHERE`.** `WHERE a.balance > 0` belongs
   before the aggregating `WITH`, where it stays on the server.
@@ -423,8 +431,8 @@ subject to change, so recheck that page and retest when a query fails.
 | Property plus aggregate on the same node | `MATCH (a:Account) RETURN a.region, count(a) AS c ORDER BY c DESC LIMIT 10` runs and returns the six regions. The official page says this form fails. |
 | `UNION` / `UNION ALL` | Each branch runs as its own pushed warehouse statement and the engine concatenates the results. Verified with a two-label count and used by the cycles recipe. |
 | Plain comparisons in `WHERE` | Numeric comparisons, `abs()`, arithmetic on amounts, `timestamp >= timestamp`, `timestamp >= $param`, `timestamp >= datetime("2020-01-01T00:00:00Z")`. |
-| `toInteger()` on a timestamp | It returns epoch seconds, in `RETURN`, in a `WITH`, and in `WHERE`. `toInteger(o.transferTimestamp) - toInteger(i.transferTimestamp) < 86400` filters to a 24-hour gap. Stock Cypher rejects `toInteger()` on a temporal value, so this form works only on the Virtual Graph. |
-| Temporal projection in `RETURN` | `date(timestamp)`, `duration.inSeconds(...)` and `duration.between(...)`. The `.epochMillis` property also runs, but it raises the `01N52` warning. `duration.inSeconds` inside an aggregate, or `date()` as a group key, keeps the `GROUP BY` out of the SQL. See [Adaptation recipes](#adaptation-recipes). |
+| `toInteger()` on a timestamp | On Databricks it returns epoch seconds, in `RETURN`, in a `WITH`, and in `WHERE`. On S3 Tables it fails with `50NG0`, because DuckDB rejects the timestamp-to-`BIGINT` cast. Stock Cypher rejects `toInteger()` on a temporal value. Use the integer `transferEpochSeconds` and `txnEpochSeconds` properties instead. `o.transferEpochSeconds - i.transferEpochSeconds < 86400` filters to a 24-hour gap. |
+| Temporal projection in `RETURN` | `date(timestamp)`, `duration.inSeconds(...)` and `duration.between(...)`. The `.epochMillis` and `.epochSeconds` properties also run, but they raise the `01N52` warning. `duration.inSeconds` inside an aggregate, or `date()` as a group key, keeps the `GROUP BY` out of the SQL. See [Adaptation recipes](#adaptation-recipes). |
 | Open quantified path patterns | An anchored `(a:Account {accountId: 7855})-[:TRANSFERRED_TO]->{1,2}(b:Account)` runs. It must be the only `MATCH` in the query, and no hop may follow the quantified part. The warehouse runs it as a recursive query, so deeper bounds grow fast: `{1,3}` from the same anchor fails after 17s with the Databricks `RECURSION_ROW_LIMIT_EXCEEDED` error at 1,000,000 rows. |
 | `MATCH` followed by `UNWIND` | `MATCH (a:Account {accountId: 7855}) UNWIND [1, 2] AS x RETURN a.accountId, x` runs. A bare `UNWIND [1, 2, 3] AS x RETURN x` also runs. |
 | Correlated `CALL` subquery | `MATCH (a:Account {accountId: 7855}) CALL (a) { MATCH (a)-[t:TRANSFERRED_TO]->(b:Account) RETURN count(t) AS c } RETURN c` runs and returns 119. The official page lists `CALL` as unsupported. |
@@ -439,8 +447,8 @@ Most rejections return `42NG1` with a specific reason.
 |---|---|
 | Writes | `SET` fails with `42NG0`. The official page lists every write clause, including `CREATE` and `MERGE`, as unsupported. The Virtual Graph is read-only. |
 | `OPTIONAL MATCH` | Fails fast with `42NG1: Unsupported syntax: OPTIONAL MATCH`, with or without `CYPHER 25`. This matches the official page. Use the split form in [Pattern 4](#pattern-4-split-cross-products-into-independent-halves). |
-| Temporal arithmetic in a filtering `WHERE` | `datetime() - duration({...})`, `date() - duration({...})`, timestamp-plus-duration compared across relationships, `duration.inSeconds(...)` and `duration.between(...)`, and `.epochMillis` subtraction all fail with `42NG0`. The same functions work in `RETURN`. `toInteger()` arithmetic works in `WHERE` instead. |
-| Variable-length paths and closed quantified paths | `*1..2` returns `42NG1: Unsupported var-length relationship`. `(a)-[:TRANSFERRED_TO]->{2,4}(a)` returns `42NG1: Equijoin on the outer nodes of a quantified path pattern is not supported`. A hop after the quantified part returns `42NG1: Path concatenation is only supported in the context of a (node pattern, quantified path pattern, node pattern)`. A second `MATCH` returns `42NG1: Quantified path patterns are only supported in queries containing a single MATCH clause`. |
+| Temporal arithmetic in a filtering `WHERE` | `datetime() - duration({...})`, `date() - duration({...})`, timestamp-plus-duration compared across relationships, `duration.inSeconds(...)` and `duration.between(...)`, and `.epochMillis` subtraction all fail with `42NG0`. The same functions work in `RETURN`. Arithmetic on the integer epoch properties works in `WHERE` instead. |
+| Variable-length paths and closed quantified paths | `*1..2` returns `42NG1: Unsupported var-length relationship`. `(a)-[:TRANSFERRED_TO]->{2,4}(a)` returns `42NG1: Equijoin on the outer nodes of a quantified path pattern is not supported`. On S3 Tables, the same pattern returns `42NG1: Only fixed-bound intervals of the form {1,N}`. A hop after the quantified part returns `42NG1: Path concatenation is only supported in the context of a (node pattern, quantified path pattern, node pattern)`. A second `MATCH` returns `42NG1: Quantified path patterns are only supported in queries containing a single MATCH clause`. |
 | `MATCH` after `WITH` | `MATCH (a:Account) WITH count(a) ... MATCH (m:Merchant) ...` fails at parse time with `42NG1: Aggregating WITH clause is not supported`. A plain `WITH a` followed by `MATCH` fails with `42NG0`. The official page states the rule: a `MATCH` after a `WITH` is unsupported. `WITH` is a projection boundary: it ends one query part and begins another, carrying forward only the variables it names. The Virtual Graph cannot translate a second `MATCH` opened after that horizon. `count()` itself is supported on each side. Workaround: combine two single-label counts with `UNION ALL` in one statement. Each branch has its own independent scope and runs as its own pushed warehouse query. |
 | `CYPHER 25` version prefix | Runs, but does not enable any of the above. |
 | Subquery expressions and leading `CALL` | `EXISTS { MATCH ... }` and `COUNT { ... }` fail with `42NG0`. `CALL () { ... }` at the start of a query returns `42NG1: The query must start with at least one MATCH clause`. The GDS path in [`gds-guide.md`](gds-guide.md) and the correlated `CALL` above run. |
@@ -526,13 +534,14 @@ one names the form to use instead.
 - **`count(DISTINCT r)` on a relationship, or `duration.inSeconds` inside an aggregate.**
   Both run, and both keep the `GROUP BY` out of the SQL. Count the relationship's
   `linkId`, per [Pattern 2](#pattern-2-count-distinct-values-on-the-server). Compute gaps
-  with `toInteger()`, per [Adaptation recipes](#adaptation-recipes).
+  on the integer epoch properties, per [Adaptation recipes](#adaptation-recipes).
 - **`ORDER BY` with `LIMIT` on an unanchored traversal of three or more hops.** The
   warehouse builds the full join before it can pick the top rows. A sorted three-hop query
   takes about 37s, and a sorted four-hop query ran past 99s. Anchor the traversal, or drop
   the sort. See [Pattern 5](#pattern-5-anchor-deep-traversals).
 - **Layering cycles with a `{2,4}` path.** The quantified path returns `42NG1: Equijoin on
-  the outer nodes of a quantified path pattern is not supported`. The path itself is the
+  the outer nodes of a quantified path pattern is not supported`. On S3 Tables, it returns
+  `42NG1: Only fixed-bound intervals of the form {1,N}`. The path itself is the
   coverage gap, so reshaping the `WITH` does not help. Enumerate fixed-length patterns and
   `UNION` them, or run on a loaded Aura graph.
 
@@ -699,8 +708,9 @@ LIMIT 15
 ```
 
 On the Virtual Graph, `avg(duration.inSeconds(...))` keeps the `GROUP BY` out of the SQL.
-The demo's query 10 computes the gap with `toInteger()` arithmetic instead, which pushes
-down.
+The demo's query 10 computes the gap as
+`avg(tOut.transferEpochSeconds - tIn.transferEpochSeconds)` instead. That form is plain
+integer arithmetic, so it pushes down on both backends.
 
 ### 11. Velocity ratio (volume vs. balance): ✓
 

@@ -100,6 +100,11 @@ SCHEMAS = {
         ]
     ),
 }
+# Each timestamp column gets an integer epoch-seconds column, added after the CSV read.
+EPOCH_COLUMNS = {
+    "txn_timestamp": "txn_epoch_seconds",
+    "transfer_timestamp": "transfer_epoch_seconds",
+}
 
 
 @dataclass
@@ -288,6 +293,19 @@ def to_utc(table: pa.Table) -> pa.Table:
     return table
 
 
+def add_epoch_seconds(table: pa.Table) -> pa.Table:
+    """Append a BIGINT epoch-seconds copy of each timestamp in EPOCH_COLUMNS.
+
+    Aura translates toInteger() on a timestamp to a SQL CAST, which DuckDB rejects.
+    Time arithmetic reads these integer columns instead, so it still pushes down.
+    """
+    for source, target in EPOCH_COLUMNS.items():
+        if source in table.column_names:
+            micros = table.column(source).cast(pa.int64())
+            table = table.append_column(target, pc.divide(micros, 1_000_000))
+    return table
+
+
 def fix_labels(table: pa.Table) -> pa.Table:
     """Turn the CSV's True/False strings into a boolean column."""
     flag = pc.equal(pc.utf8_lower(table.column("is_fraud")), "true")
@@ -297,7 +315,7 @@ def fix_labels(table: pa.Table) -> pa.Table:
 def load_tables(s: Settings) -> None:
     catalog = s3tables_catalog(s)
     for name, schema in SCHEMAS.items():
-        table = to_utc(read_csv(name, schema))
+        table = add_epoch_seconds(to_utc(read_csv(name, schema)))
         if name == "account_labels":
             table = fix_labels(table)
 
@@ -439,8 +457,32 @@ def read_with_key(s: Settings, key: AccessKey) -> None:
     print(f"  read-only credentials read {rows} row from accounts")
 
 
+# The header lines this script writes, matched by prefix when a refresh drops them.
+AURA_HEADER_PREFIXES = (
+    "# Values for the Aura Virtual Graph data source form",
+    "# Written by aws/setup_s3_tables.py.",
+    "# Credentials expire ",
+)
+
+
+def kept_lines(path: Path) -> list[str]:
+    """Lines of an existing output file that this script does not own.
+
+    The script owns its header comments and every ``AURA_*`` key. Everything else, such
+    as the ``NEO4J_*`` connection values a user adds, survives a refresh.
+    """
+    if not path.exists():
+        return []
+    return [
+        line
+        for line in path.read_text().splitlines()
+        if not line.startswith("AURA_") and not line.startswith(AURA_HEADER_PREFIXES)
+    ]
+
+
 def write_aura_values(s: Settings, key: AccessKey) -> None:
     expires = f"{key.expiration:%Y-%m-%d %H:%M %Z}" if key.expiration else "never"
+    kept = kept_lines(s.output)
     # Create the file owner-only before the secret goes in. The mode argument applies
     # only to a new file, so fchmod also tightens a file left by an earlier run.
     fd = os.open(s.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -458,6 +500,7 @@ def write_aura_values(s: Settings, key: AccessKey) -> None:
             f"AURA_AWS_SESSION_TOKEN={key.session_token or ''}\n"
             f"AURA_AWS_REGION={s.region}\n"
         )
+        f.writelines(f"{line}\n" for line in kept)
 
 
 def main() -> None:

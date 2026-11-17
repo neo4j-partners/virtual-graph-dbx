@@ -70,9 +70,10 @@ class Query:
 def avg_turnaround_to_hours(row: Row) -> None:
     """Replace Query 10's ``avgTurnaroundSeconds`` seconds with ``avgTurnaroundHours``.
 
-    The seconds come from ``toInteger()`` timestamp arithmetic, which pushes down to SQL
-    as epoch seconds. ``duration.inSeconds`` keeps the ``GROUP BY`` out of the SQL, and
-    ``.epochMillis`` on a relationship property raises ``01N52``.
+    The seconds come from the integer ``transferEpochSeconds`` property, which pushes
+    down to SQL with the ``GROUP BY``. ``toInteger()`` on a timestamp becomes a SQL cast
+    that DuckDB rejects on S3 Tables. ``duration.inSeconds`` keeps the ``GROUP BY`` out
+    of the SQL, and ``.epochMillis`` on a relationship property raises ``01N52``.
     """
     seconds = row.pop("avgTurnaroundSeconds")
     row["avgTurnaroundHours"] = round(seconds / 3600, 1)
@@ -256,9 +257,11 @@ LIMIT 50
         number=9,
         title="Shared-merchant burst (coordinated ring)",
         note=(
-            "Groups by the merchant node and day with collect(DISTINCT ...) (~5s). "
-            "The date() key keeps the GROUP BY out of the SQL. An epoch-day key "
-            "pushes down but is slower (~35s), because of the collected arrays. "
+            "Groups by the merchant node and day with collect(DISTINCT ...). "
+            "The date() key keeps the GROUP BY out of the SQL, so every joined row "
+            "comes back to Neo4j: ~5s on Databricks, ~172s on S3 Tables. An epoch-day "
+            "key pushes down but is slower on Databricks (~35s), because of the "
+            "collected arrays. "
             "accountCount>=4 and txns<=200 filtered server-side. The txns<=200 cap is "
             "a safeguard against bulk merchant-days. It never applies to this sample, "
             "where the busiest merchant-day has 7 purchases."
@@ -281,7 +284,7 @@ LIMIT 50
         note=(
             "Unbounded two-hop join grouped on scalar muleId (~1-2s). 24h window "
             "dropped to match the doc. Average turnaround is computed over all "
-            "forward-after-receive pairs as toInteger() epoch-second differences, "
+            "forward-after-receive pairs as transferEpochSeconds differences, "
             "which push down, and converted to hours client-side. rapidPairs>=50 "
             "sits in a second WITH so the GROUP BY pushes down."
         ),
@@ -293,8 +296,8 @@ WHERE tOut.transferTimestamp >= tIn.transferTimestamp
   AND src <> dst
 WITH mule.accountId AS muleId,
      count(*) AS rapidPairs,
-     avg(toInteger(tOut.transferTimestamp)
-         - toInteger(tIn.transferTimestamp)) AS avgTurnaroundSeconds
+     avg(tOut.transferEpochSeconds
+         - tIn.transferEpochSeconds) AS avgTurnaroundSeconds
 WITH muleId, rapidPairs, avgTurnaroundSeconds
 WHERE rapidPairs >= 50
 RETURN muleId AS accountId, rapidPairs, avgTurnaroundSeconds
@@ -310,8 +313,10 @@ LIMIT 50
         title="Layering cycles (loaded graph only)",
         vg_supported=False,
         note=(
-            "Unsupported on the Virtual Graph (42NG1: equijoin on the outer nodes of a "
-            "quantified path pattern). Needs a loaded graph."
+            "Unsupported on the Virtual Graph. It fails to compile with 42NG1. The "
+            "earlier message was 'equijoin on the outer nodes of a quantified path "
+            "pattern'. On S3 Tables it is 'Only fixed-bound intervals of the form "
+            "{1,N}', because of the {2,4} lower bound. Needs a loaded graph."
         ),
         cypher="""
 MATCH path = (a:Account)-[:TRANSFERRED_TO]->{2,4}(a)

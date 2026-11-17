@@ -42,6 +42,10 @@ shared with the Databricks setup in [`vg-model.md`](vg-model.md).
 Pick one AWS region and use it everywhere. When you create the Virtual Graph in Aura,
 choose AWS as the cloud provider and the same region.
 
+A Virtual Graph in a different region still works. On 2026-11-17, a Virtual Graph in
+us-west-2 read a table bucket in us-east-1. Every query then crosses regions, which adds
+latency and AWS data transfer charges.
+
 S3 Tables namespace and table names allow only lowercase letters, numbers, and
 underscores. That is why the namespace is `finance_genie`.
 
@@ -95,6 +99,9 @@ catalog settings.
 
 This step runs as your own AWS identity, which needs write access to the table bucket.
 Timestamps are stored as Iceberg `timestamptz` in UTC, matching Databricks `TIMESTAMP`.
+The script also appends a BIGINT epoch-seconds copy of each timestamp.
+`transactions` gets `txn_epoch_seconds` after `txn_hour`. `account_links` gets
+`transfer_epoch_seconds` after `transfer_timestamp`.
 
 Confirm the tables exist:
 
@@ -242,6 +249,12 @@ The model uses the same camelCase property names, such as `accountId` and
 [section 3](vg-model.md#3-define-your-schema) renames the properties and lists
 every column and its property name.
 
+Map the two epoch-seconds columns as integer properties. Map `txn_epoch_seconds` to
+`txnEpochSeconds` on `TRANSACTED_WITH`. Map `transfer_epoch_seconds` to
+`transferEpochSeconds` on `TRANSFERRED_TO`. Query 10 and the `gds-probe` timestamp
+scenarios read them. `toInteger()` on a timestamp fails on S3 Tables, because DuckDB
+rejects the timestamp-to-`BIGINT` cast.
+
 Download the credentials file when Aura prompts you after **Create Virtual Graph**. Put
 the connection URI and password in `.env`.
 
@@ -256,6 +269,9 @@ uv run vg-demo --demo fast-gds          # working PageRank path (7-day window)
 uv run vg-demo --demo gds-probe         # sweep property projections (7-day window)
 uv run vg-demo --demo gds-examples      # PageRank, WCC and Louvain on every transfer
 ```
+
+If every query fails with `Unable to retrieve routing information`, see
+[If the connection fails with a certificate error](running-demos.md#if-the-connection-fails-with-a-certificate-error).
 
 Three parts of this project are Databricks only and do not apply on AWS:
 

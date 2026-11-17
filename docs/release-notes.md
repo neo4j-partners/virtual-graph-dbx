@@ -1,5 +1,35 @@
 # Release Notes
 
+## 2026-11: Epoch-seconds columns for time arithmetic
+
+Time arithmetic now uses one query form on both Databricks and S3 Tables.
+
+**The S3 Tables cast bug**
+
+- On S3 Tables, Aura reads Iceberg through embedded DuckDB. It translates `toInteger(t.transferTimestamp)` to `CAST AS BIGINT`. DuckDB rejects that cast for every timestamp type, so the query fails with `50NG0 ... Conversion Error: Unimplemented type for cast (TIMESTAMP WITH TIME ZONE -> BIGINT)`.
+- `toFloat()` on a timestamp emits `CAST AS DOUBLE PRECISION`, and DuckDB rejects that too.
+- `.epochSeconds`, `.epochMillis`, `duration.inSeconds(...)` and `duration.between(...)` return correct values on S3 Tables. They run in the engine, so a `GROUP BY` over them does not push down. The accessors also raise the `01N52` warning.
+- On Databricks, `toInteger()` on a timestamp works and pushes down.
+
+**New columns and properties**
+
+- `transactions.txn_epoch_seconds` is a BIGINT column after `txn_hour`. It maps to the `txnEpochSeconds` property on `TRANSACTED_WITH`.
+- `account_links.transfer_epoch_seconds` is a BIGINT column after `transfer_timestamp`. It maps to the `transferEpochSeconds` property on `TRANSFERRED_TO`.
+- Each column holds the Unix epoch seconds of the matching timestamp. Every source timestamp is a whole second.
+- `aws/setup_s3_tables.py` and `notebooks/01_setup_lakehouse.ipynb` both write the new columns.
+- The `transferTimestamp` and `txnTimestamp` properties stay. Use them for comparisons and display.
+
+**Query changes**
+
+- Query 10 computes its turnaround as `avg(tOut.transferEpochSeconds - tIn.transferEpochSeconds)`. The demo still converts the seconds to hours in Python.
+- The `gds-probe` timestamp scenarios C and D now bind `t.transferEpochSeconds * 1000 AS transferTimestampMs` in a `WITH`.
+
+**Before the change is live**
+
+- Re-run both setups, `aws/setup_s3_tables.py` and `notebooks/01_setup_lakehouse.ipynb`, so the tables carry the new columns.
+- Add the `txnEpochSeconds` and `transferEpochSeconds` mappings to the Virtual Graph model as integer properties. See step 7 and step 8 of [section 3](vg-model.md#3-define-your-schema).
+- Neither backend has been re-run with the new columns yet. No timings are recorded for the new form.
+
 ## 2026-09: Virtual Graph engine update
 
 The latest Virtual Graph update is a big step forward. We re-ran every demo, support script, and documented finding in this project against it.

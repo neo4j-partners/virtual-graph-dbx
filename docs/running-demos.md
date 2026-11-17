@@ -34,6 +34,20 @@ The demos read these variables:
 - **`PROBE_ENV`, from the shell only.** It points the demos at a different dotenv. The
   demos read it before loading any dotenv, so setting it inside `.env` has no effect.
 
+### If the connection fails with a certificate error
+
+On macOS, the Python that `uv` installs may not trust the certificate chain of
+`*.graph-engine.neo4j.io`. Every query then fails with `ServiceUnavailable: Unable to
+retrieve routing information`. The underlying cause is `SSLCertVerificationError:
+self-signed certificate in certificate chain`. The server's chain ends at the `SSL.com
+TLS RSA Root CA 2022` root, and that Python's CA file does not include it. Point Python
+at the certifi bundle in the project environment, then run the demos from the same
+shell:
+
+```bash
+export SSL_CERT_FILE="$(uv run python -c 'import certifi; print(certifi.where())')"
+```
+
 ## Run the demos
 
 Run any demo from the project root (`uv run` installs the project and its dependencies
@@ -108,8 +122,8 @@ run takes about 20 seconds.
   This split is needed because `OPTIONAL MATCH` is unsupported. Its `transferCount >= 100`
   threshold runs in Cypher. Only the `merchantCount < 20` check runs client-side, after
   the join.
-- The rapid-turnover query computes its average turnaround in seconds from `toInteger()`
-  timestamp arithmetic. The demo converts it to `avgTurnaroundHours`.
+- The rapid-turnover query computes its average turnaround in seconds from the integer
+  `transferEpochSeconds` property. The demo converts it to `avgTurnaroundHours`.
 - Recent windows are passed as a precomputed `$since` parameter.
 - Any error is caught and printed so the run continues.
 
@@ -123,12 +137,13 @@ run takes about 20 seconds.
 | 6 | Spray accounts (fan-out): one account paying many distinct recipients | works, under 1s |
 | 7 | Courier accounts: heavy peer-to-peer transfers, little merchant spend | works, about 4s |
 | 8 | Pass-through mule (local betweenness proxy) | works, about 1-2s |
-| 9 | Shared-merchant burst (coordinated ring) | works, about 5-9s |
-| 10 | Rapid-turnover per account | works, about 1s |
+| 9 | Shared-merchant burst (coordinated ring) | works, about 5-9s on Databricks and about 172s on S3 Tables |
+| 10 | Rapid-turnover per account | works, about 1s with the earlier `toInteger()` form on Databricks |
 
 Query 11, layering cycles, is not run. The demo prints "Not run" for it, because the
 Virtual Graph does not support it. Its quantified path `{2,4}` fails with `42NG1: Equijoin on the outer nodes of a quantified
-path pattern is not supported`. The cycles recipe in
+path pattern is not supported`. On S3 Tables, it fails with `42NG1: Only fixed-bound
+intervals of the form {1,N}`. The cycles recipe in
 [`best-practices.md`](best-practices.md#adaptation-recipes) describes the workaround.
 
 ### `fast-gds` demo
@@ -188,17 +203,20 @@ usable properties to GDS projections:
 
 - A GDS in-memory graph only accepts **numeric** property types.
 - The demo converts transfer timestamps to epoch milliseconds with
-  `WITH src, dst, t, toInteger(t.transferTimestamp) * 1000 AS transferTimestampMs`.
-  The Virtual Graph pushes `toInteger()` on a timestamp down to SQL as epoch seconds, and
-  the form raises no warning. Every timestamp is a whole second, so the values equal
-  `epochMillis` exactly.
-- The conversion has to go through a `WITH`. Inside the projection's config map,
-  `toInteger()` on a timestamp fails with `22N38`.
+  `WITH src, dst, t, t.transferEpochSeconds * 1000 AS transferTimestampMs`.
+  `transferEpochSeconds` is an integer property, so the form runs on both backends. Every
+  timestamp is a whole second, so the values equal `epochMillis` exactly.
+- `toInteger(t.transferTimestamp)` pushes down on Databricks, but it fails on S3 Tables.
+  There, DuckDB rejects the timestamp-to-`BIGINT` cast.
+- The conversion has to go through a `WITH`. An expression inside the projection's config
+  map runs in the engine. On Databricks, `toInteger()` on a timestamp there failed with
+  `22N38`.
 - It leaves string identifiers outside the projection, where they can be looked up by
   account ID.
 - The demo sweeps projections on the default 7-day window, adding properties one at a
   time and reporting which project and which are skipped.
-- On the 7-day window, scenarios A to E each project in 33 to 46s. Weighted PageRank
+- On Databricks, on the 7-day window, scenarios A to E each projected in 33 to 46s.
+  Scenarios C and D were measured with the earlier `toInteger()` form. Weighted PageRank
   works on the projected `amount`.
 - It first samples one row from the window and prints each property's type, then runs:
 
@@ -206,7 +224,7 @@ usable properties to GDS projections:
 |---|---|---|
 | A_control | labels + `relationshipType` only | projects |
 | B_rel_amount | `relationshipProperties { amount }` (float) + weighted PageRank | projects, weight usable |
-| C_rel_timestamp | `relationshipProperties { transferTimestampMs }` (`toInteger(t.transferTimestamp) * 1000`, bound in a `WITH`) | projects |
+| C_rel_timestamp | `relationshipProperties { transferTimestampMs }` (`t.transferEpochSeconds * 1000`, bound in a `WITH`) | projects |
 | D_rel_both | `amount` + `transferTimestampMs` | projects, weight usable |
 | E_node_numeric | a numeric node property on both endpoints | projects |
 | F_node_nonnumeric | a string or temporal node property on both endpoints | skipped before provisioning |

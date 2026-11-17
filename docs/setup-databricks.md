@@ -62,10 +62,10 @@ The panel shows the data source set to Databricks with the server hostname, HTTP
 The screenshot comes from an earlier setup. It shows the catalog `graph-on-databricks` and the schema `graph-enriched-schema`. Its `accounts` table has no `account_name` column. With the notebook defaults, your panel shows `virtual-graph-dbx` and `vg-schema`, and these tables:
 
 - `account_labels` with `account_id` and `is_fraud`
-- `account_links` with `link_id`, `src_account_id`, `dst_account_id`, `amount`, and `transfer_timestamp`
+- `account_links` with `link_id`, `src_account_id`, `dst_account_id`, `amount`, `transfer_timestamp`, and `transfer_epoch_seconds`
 - `accounts` with `account_id`, `account_hash`, `account_name`, `account_type`, `region`, `balance`, `opened_date`, and `holder_age`
 - `merchants` with `merchant_id`, `merchant_name`, `category`, and `region`
-- `transactions` with `txn_id`, `account_id`, `merchant_id`, `amount`, `txn_timestamp`, and `txn_hour`
+- `transactions` with `txn_id`, `account_id`, `merchant_id`, `amount`, `txn_timestamp`, `txn_hour`, and `txn_epoch_seconds`
 
 Scroll down to see `merchants` and `transactions`. All five Silver tables are discovered. Seeing these tables and columns confirms that Aura can reach the warehouse and read the Finance Genie schema.
 

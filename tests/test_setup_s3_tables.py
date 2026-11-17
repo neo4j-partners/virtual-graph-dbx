@@ -157,11 +157,19 @@ class SetupS3TablesTests(unittest.TestCase):
             self.assertIn("AURA_AWS_SECRET=secret\n", fresh.read_text())
 
             stale = Path(tmp) / ".env.old"
-            stale.write_text("STALE-SECRET")
+            stale.write_text(
+                "# Credentials expire 2025-01-01 00:00 UTC.\n"
+                "AURA_AWS_SECRET=STALE-SECRET\n"
+                "NEO4J_URI=neo4j+s://example.invalid\n"
+            )
             stale.chmod(0o644)
             self.mod.write_aura_values(self.settings(output=stale), key)
             self.assertEqual(stat.S_IMODE(stale.stat().st_mode), 0o600)
-            self.assertNotIn("STALE-SECRET", stale.read_text())
+            text = stale.read_text()
+            self.assertNotIn("STALE-SECRET", text)
+            self.assertNotIn("2025-01-01", text)
+            self.assertEqual(text.count("AURA_AWS_SECRET="), 1)
+            self.assertTrue(text.endswith("NEO4J_URI=neo4j+s://example.invalid\n"))
 
     def test_check_output_ignored(self) -> None:
         self.mod.check_output_ignored(REPO_ROOT / ".env.aws")
@@ -169,6 +177,22 @@ class SetupS3TablesTests(unittest.TestCase):
             self.mod.check_output_ignored(Path(tmp) / "aura.env")
         with self.assertRaises(SystemExit):
             self.mod.check_output_ignored(REPO_ROOT / "aura-values.txt")
+
+    def test_add_epoch_seconds_appends_whole_seconds(self) -> None:
+        pa = self.mod.pa
+        stamps = [datetime(2024, 1, 26, 10, 20, tzinfo=UTC), None]
+        links = pa.table({
+            "link_id": pa.array([1, 2], pa.int64()),
+            "transfer_timestamp": pa.array(stamps, pa.timestamp("us", tz="UTC")),
+        })
+        out = self.mod.add_epoch_seconds(links)
+        self.assertEqual(out.column_names[-1], "transfer_epoch_seconds")
+        self.assertEqual(out.schema.field("transfer_epoch_seconds").type, pa.int64())
+        self.assertEqual(out.column("transfer_epoch_seconds").to_pylist(),
+                         [1706264400, None])
+        accounts = pa.table({"account_id": pa.array([1], pa.int64())})
+        self.assertEqual(self.mod.add_epoch_seconds(accounts).column_names,
+                         ["account_id"])
 
 
 if __name__ == "__main__":

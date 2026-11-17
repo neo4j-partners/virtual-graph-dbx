@@ -3,8 +3,8 @@
 This walkthrough shows how the Finance Genie Virtual Graph finds money laundering. It
 covers fraud queries 1 to 10, the same set `uv run vg-demo --demo fraud` runs. Every query
 below has been tested on the Virtual Graph. Most come back in about a second. Query 7
-takes about 4 seconds, and query 9 takes 5 to 9 seconds. Copy and paste each one as
-written.
+takes about 4 seconds. Query 9 takes 5 to 9 seconds on Databricks and about 172 seconds
+on S3 Tables. Copy and paste each one as written.
 
 ## Overview of the Data
 
@@ -355,16 +355,19 @@ that repeats a backing column name, such as the old `account_id`, fails in the S
 Virtual Graph generates. See the [aliasing rule](best-practices.md#pattern-2-count-distinct-values-on-the-server) in `best-practices.md`.
 
 The textbook form of this query also requires the money to go out within 48 hours. The
-Virtual Graph cannot add a duration to a timestamp inside `WHERE`. A window written as
-`toInteger(tOut.transferTimestamp) - toInteger(tIn.transferTimestamp) < 172800` does
-run. This version keeps only the "out after in" ordering, so its results match the demo.
+Virtual Graph cannot add a duration to a timestamp inside `WHERE`. Write the window on the
+integer epoch properties instead:
+`tOut.transferEpochSeconds - tIn.transferEpochSeconds < 172800`. This version keeps only
+the "out after in" ordering, so its results match the demo.
 
 #### 9. Shared-merchant burst: many accounts, one shop, one day
 
 Fraud rings often test stolen cards or cash out at the same small merchant on the same
 day. This query groups purchases by merchant and by day and collects the different
 accounts that bought there. It keeps the days where four or more accounts showed up at a
-merchant. Runs in 5 to 9 seconds.
+merchant. It runs in 5 to 9 seconds on Databricks and about 172 seconds on S3 Tables. The
+`date()` group key keeps the grouping in Neo4j, so every joined row comes back from the
+source.
 
 ```cypher
 MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
@@ -403,8 +406,8 @@ reports the average time between receiving and forwarding.
 
 The query joins every transfer into an account to every transfer out of it at the same
 time or later. No time window or anchor narrows the join, so it matches about 11 million
-pairs. The counting and averaging run on Databricks, which returns one row per account.
-It takes about a second.
+pairs. The counting and averaging run in the data source, which returns one row per
+account. On Databricks, the earlier `toInteger()` form of this query took about a second.
 
 ```cypher
 MATCH (src:Account)-[tIn:TRANSFERRED_TO]->(mule:Account)
@@ -413,8 +416,8 @@ WHERE tOut.transferTimestamp >= tIn.transferTimestamp
   AND src <> dst
 WITH mule.accountId AS muleId,
      count(*) AS rapidPairs,
-     avg(toInteger(tOut.transferTimestamp)
-         - toInteger(tIn.transferTimestamp)) AS avgTurnaroundSeconds
+     avg(tOut.transferEpochSeconds
+         - tIn.transferEpochSeconds) AS avgTurnaroundSeconds
 WITH muleId, rapidPairs, avgTurnaroundSeconds
 WHERE rapidPairs >= 50
 RETURN muleId AS accountId, rapidPairs, avgTurnaroundSeconds
@@ -430,20 +433,25 @@ A short turnaround makes the signal stronger. Each row is one account:
 * `avgTurnaroundSeconds`: the average time between receiving money and sending money on, in
   seconds.
 
-`toInteger()` turns each timestamp into epoch seconds, and Databricks computes the
-average. The demo converts the seconds to hours on the client and prints them as
-`avgTurnaroundHours`. `avg(duration.inSeconds(...))` returns the same hours, but it keeps
-the aggregation in the graph engine. That form took about 208 seconds. Reading
-`.epochMillis` off the timestamps raises an `01N52` unknown-property warning.
+`transferEpochSeconds` holds each transfer's timestamp as integer epoch seconds. The
+subtraction is plain integer arithmetic, so the data source computes the average. The
+demo converts the seconds to hours on the client and prints them as `avgTurnaroundHours`.
+`avg(duration.inSeconds(...))` returns the same hours, but it keeps the aggregation in the
+graph engine. That form took about 208 seconds. Reading `.epochMillis` off the timestamps
+raises an `01N52` unknown-property warning. Earlier versions used
+`toInteger(tOut.transferTimestamp)`. That form pushes down on Databricks, but it fails on
+S3 Tables, where DuckDB rejects the timestamp-to-`BIGINT` cast.
 
 The textbook form also limits each pair to 24 hours. The Virtual Graph cannot add a
-duration to a timestamp inside `WHERE`. Adding
-`AND toInteger(tOut.transferTimestamp) - toInteger(tIn.transferTimestamp) < 86400`
-does run, in about 1.6 seconds. It changes the results, so this version averages over
+duration to a timestamp inside `WHERE`. Add
+`AND tOut.transferEpochSeconds - tIn.transferEpochSeconds < 86400` instead. On
+Databricks, the same window written with `toInteger()` ran in about 1.6 seconds. The
+window changes the results, so this version averages over
 every forward-after-receive pair to match the demo. The word "rapid" in the name describes the intent. The query
 itself enforces no time limit. In this sample
 the top 50 accounts average 29 to 32 days between receiving and forwarding. The top row is
-13914, with 33,229 pairs and an average of 756.8 hours.
+13914, with 33,229 pairs and an average of 756.8 hours. These figures come from the
+`toInteger()` form on Databricks.
 
 Like query 8, this query surfaces high-volume hubs in this sample. None of its top 50
 accounts is labeled fraud, and all 50 are already on the query 7 courier list. It shares 34

@@ -57,6 +57,8 @@ Build that model with the following steps.
 
 3. Remove every relationship Aura generated. You will recreate the two you need by hand so the node ID mappings are explicit.
 4. Remove the `transactions` and `account_links` nodes. These are edge tables and become relationships, not nodes.
+
+   > **Tip:** On a Mac, hold **Command** and click with the mouse to select several nodes at once.
 5. Rename the two remaining node labels. **Generate from schema** labels each node after its table, so the nodes arrive as `accounts` and `merchants`. Change the label of `accounts` to `Account` and the label of `merchants` to `Merchant`. Leave the backing tables unchanged.
 6. Rename the properties. **Generate from schema** names each node property after its column, so the properties arrive in snake_case. In the model editor, rename every `Account` and `Merchant` property to the name in the table below. Leave the mapped columns unchanged. The relationship properties get their names in the next two steps, when you create the relationships. The table lists every property in the model, so you can tick each one off. A row whose column and property match needs no rename.
 
@@ -78,9 +80,19 @@ Build that model with the following steps.
    | `TRANSACTED_WITH` | `amount` | `amount` |
    | `TRANSACTED_WITH` | `txn_timestamp` | `txnTimestamp` |
    | `TRANSACTED_WITH` | `txn_hour` | `txnHour` |
+   | `TRANSACTED_WITH` | `txn_epoch_seconds` | `txnEpochSeconds` |
    | `TRANSFERRED_TO` | `link_id` | `linkId` |
    | `TRANSFERRED_TO` | `amount` | `amount` |
    | `TRANSFERRED_TO` | `transfer_timestamp` | `transferTimestamp` |
+   | `TRANSFERRED_TO` | `transfer_epoch_seconds` | `transferEpochSeconds` |
+
+   Then set the ID of each node. Select the node and find the **ID** field at the bottom right of the panel. Set it to `accountId` for `Account` and to `merchantId` for `Merchant`.
+
+   > **Set the node IDs before you create relationships:** A relationship connects its two end nodes by their node IDs. The **Node ID mapping** section of a relationship reads the **ID property** from each end node. If a node has no ID, the relationship has no ID property to map its column to.
+
+   ![The Account node with its ID set to accountId](images/vg-model-account-node.png)
+
+   ![The Merchant node with its ID set to merchantId](images/vg-model-merchant-node.png)
 
 7. Create the `TRANSACTED_WITH` relationship, as shown below:
 
@@ -93,14 +105,13 @@ Build that model with the following steps.
      | `amount` | float | `amount` |
      | `txnTimestamp` | datetime | `txn_timestamp` |
      | `txnHour` | integer | `txn_hour` |
+     | `txnEpochSeconds` | integer | `txn_epoch_seconds` |
 
      Set the **id** to `txnId`.
    - Under **Node ID mapping**, set **From** to `Account`, with ID property `accountId` mapped from ID column `account_id`.
    - Set **To** to `Merchant`, with ID property `merchantId` mapped from ID column `merchant_id`.
 
-   ![Create the TRANSACTED_WITH relationship](images/load-vg-step-1.png)
-
-   The screenshots in this step and the next predate the property rename. They show snake_case property names such as `txn_id`. Enter the camelCase names from the tables instead.
+   ![Create the TRANSACTED_WITH relationship](images/vg-model-transacted-with.png)
 
 8. Create the `TRANSFERRED_TO` relationship, as shown below. Both ends map to the `Account` node. The source and destination differ only by which column supplies the ID:
 
@@ -112,14 +123,17 @@ Build that model with the following steps.
      | `linkId` | integer | `link_id` |
      | `amount` | float | `amount` |
      | `transferTimestamp` | datetime | `transfer_timestamp` |
+     | `transferEpochSeconds` | integer | `transfer_epoch_seconds` |
 
      Set the **id** to `linkId`.
    - Under **Node ID mapping**, set **From** to `Account`, with ID property `accountId` mapped from ID column `src_account_id`.
    - Set **To** to `Account`, with ID property `accountId` mapped from ID column `dst_account_id`.
 
-   ![Create the TRANSFERRED_TO relationship](images/load-vg-step-2.png)
+   ![Create the TRANSFERRED_TO relationship](images/vg-model-transferred-to.png)
 
    The `txn_timestamp` and `transfer_timestamp` columns hold UTC timestamps. Compare the `txnTimestamp` and `transferTimestamp` properties against zoned literals such as `datetime("2024-03-23T23:58:00Z")`, as every query in this project does.
+
+   The `txn_epoch_seconds` and `transfer_epoch_seconds` columns hold the same timestamps as integer Unix epoch seconds. Use the `txnEpochSeconds` and `transferEpochSeconds` properties for time arithmetic, such as the gap between two transfers. Integer arithmetic pushes down on both Databricks and S3 Tables. `toInteger()` on a timestamp property fails on S3 Tables.
 
    > **On Databricks:** The columns are Databricks `TIMESTAMP` columns. The engine reports the properties as `LOCAL DATETIME` in `db.schema.relTypeProperties()`. The values themselves come back as UTC datetimes, and `valueType()` reports them as `ZONED DATETIME`.
 
