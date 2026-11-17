@@ -164,7 +164,8 @@ aws sts assume-role --duration-seconds 3600 \
 The temporary credentials expire. Assumed from an SSO session, they last at most one
 hour. After that, the Virtual Graph loses access to the data. Refresh them without
 reloading the tables, then paste the new key, secret, and session token into the Aura
-data source:
+data source. [Refresh the credentials in Aura](#refresh-the-credentials-in-aura) shows
+where. The refresh command is:
 
 ```bash
 uv run aws/setup_s3_tables.py --profile default --creds-only
@@ -209,6 +210,22 @@ Filter by user name `aura-virtual-graph` to find them. Reads of table data, such
 `GetTableData`, are data events. Event history does not show data events. A denied data
 read appears only in a trail that logs S3 Tables data events. Add the denied action to
 the policy and run the script again.
+
+### Refresh the credentials in Aura
+
+The credentials in the data source are temporary. When they expire, the Virtual Graph
+loses access to the tables. Run the refresh command from Step 3 to get new values. Then
+update the data source in Aura:
+
+1. Go to **Import → Data sources**.
+2. Select the S3 table bucket data source to open its **View details** panel.
+3. Select **Edit data source**.
+4. Replace **AWS Key**, **AWS Secret**, and **AWS Session Token** with the new values
+   from `.env.aws`, then save.
+
+> **Possible bug:** The edit may not save the new credentials. After **Confirm
+> changes**, open **View details** again and check that **AWS Key** shows the new key
+> ID. If it still shows the old one, the Virtual Graph keeps the expired credentials.
 
 ## Step 5: Build the graph model
 
