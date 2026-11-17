@@ -1,6 +1,6 @@
 """Basic demo (``--demo basic``).
 
-The warm-up exploration / visualization queries from ``basic-graph-examples.md``:
+The warm-up exploration / visualization queries from ``docs/basic-graph-examples.md``:
 simple counts and small, anchored traversals that show the value of the relationships
 without any fraud logic.
 """
@@ -23,28 +23,28 @@ def pick_anchors(driver: Driver) -> tuple[int, int]:
     """Pick an anchor account and a merchant for the basic graph queries.
 
     The anchored traversals need a node to start from. The defaults are account 17813
-    and merchant 1, which the numbers in ``basic-graph-examples.md`` are measured
-    against. If a default is missing, the fallback is the lowest account_id with an
-    outgoing transfer, or the lowest merchant_id. The chosen ids are printed so the
+    and merchant 1, which the numbers in ``docs/basic-graph-examples.md`` are measured
+    against. If a default is missing, the fallback is the lowest accountId with an
+    outgoing transfer, or the lowest merchantId. The chosen ids are printed so the
     same query can be pasted into the Aura Workspace.
     """
     rec, _, _ = driver.execute_query(
-        "MATCH (a:Account {account_id: $id}) RETURN a.account_id AS id",
+        "MATCH (a:Account {accountId: $id}) RETURN a.accountId AS id",
         id=DEFAULT_ACCOUNT_ID,
     )
     if not rec:
         rec, _, _ = driver.execute_query(
             "MATCH (a:Account)-[:TRANSFERRED_TO]->(:Account) "
-            "RETURN a.account_id AS id ORDER BY id LIMIT 1"
+            "RETURN a.accountId AS id ORDER BY id LIMIT 1"
         )
     account_id = first_row(rec, "an anchor account")["id"]
     rec, _, _ = driver.execute_query(
-        "MATCH (m:Merchant {merchant_id: $id}) RETURN m.merchant_id AS id",
+        "MATCH (m:Merchant {merchantId: $id}) RETURN m.merchantId AS id",
         id=DEFAULT_MERCHANT_ID,
     )
     if not rec:
         rec, _, _ = driver.execute_query(
-            "MATCH (m:Merchant) RETURN m.merchant_id AS id ORDER BY id LIMIT 1"
+            "MATCH (m:Merchant) RETURN m.merchantId AS id ORDER BY id LIMIT 1"
         )
     merchant_id = first_row(rec, "an anchor merchant")["id"]
     return account_id, merchant_id
@@ -85,8 +85,8 @@ def run_basic(driver: Driver, max_rows: int, timeout: float) -> bool:
     Returns True only when every query succeeded.
     """
     account_id, merchant_id = pick_anchors(driver)
-    params = {"account_id": account_id, "merchant_id": merchant_id}
-    print(f"Anchors: account_id={account_id}, merchant_id={merchant_id} "
+    params = {"accountId": account_id, "merchantId": merchant_id}
+    print(f"Anchors: accountId={account_id}, merchantId={merchant_id} "
           f"(used by the graph queries).")
     print(f"Running {len(BASIC_QUERIES)} basic quer"
           f"{'y' if len(BASIC_QUERIES) == 1 else 'ies'} (timeout {timeout:g}s each).")

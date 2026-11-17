@@ -26,11 +26,11 @@ from demos.gds_common import (
     project_with_cleanup,
     run_statement,
 )
-from helpers import data_max_dates
+from helpers import data_max_dates, verify_or_exit
 
 COUNT_WINDOW = """
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= $since
+WHERE t.transferTimestamp >= $since
 RETURN count(t) AS edges
 """
 
@@ -39,7 +39,7 @@ RETURN count(t) AS edges
 # explain a failure in terms of the value type GDS saw.
 SAMPLE_ROW = """
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= $since
+WHERE t.transferTimestamp >= $since
 RETURN properties(t) AS rel, properties(src) AS node
 LIMIT 1
 """
@@ -49,7 +49,7 @@ LIMIT 1
 # scenario's WITH clause adds); both are internal strings, not user input.
 PROJECT_TEMPLATE = """
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= $since
+WHERE t.transferTimestamp >= $since
 {with_clause}
 RETURN gds.graph.project(
   $graph,
@@ -77,7 +77,7 @@ LIMIT 5
 # engine-side and rejected (22N38), so it is bound in a WITH first. Every
 # account_links timestamp is a whole second, so `* 1000` matches epochMillis exactly.
 TIMESTAMP_MS_WITH = (
-    "WITH src, dst, t, toInteger(t.transfer_timestamp) * 1000 AS transfer_timestamp_ms"
+    "WITH src, dst, t, toInteger(t.transferTimestamp) * 1000 AS transferTimestampMs"
 )
 
 # The label/type-only base every scenario starts from (the known-good fast-gds shape).
@@ -120,13 +120,13 @@ def _type_name(value: object) -> str:
 def _pick_props(node_props: dict[str, object]) -> tuple[str | None, str | None]:
     """Pick one numeric and one non-numeric node property to probe, if available.
 
-    The numeric pick skips identifier keys such as ``account_id``, because an ID
+    The numeric pick skips identifier keys such as ``accountId``, because an ID
     projects as a number but carries no measurement.
     """
     numeric = next(
         (k for k, v in node_props.items()
          if isinstance(v, (int, float)) and not isinstance(v, bool)
-         and k != "id" and not k.endswith("_id")),
+         and k != "id" and not k.endswith("Id")),
         None,
     )
     non_numeric = next(
@@ -147,16 +147,16 @@ def _build_scenarios(node_num: str | None, node_str: str | None) -> list[Scenari
                  BASE_CONFIG + ", relationshipProperties: { amount: t.amount }",
                  weight_prop="amount"),
         Scenario("C_rel_timestamp",
-                 "relationshipProperties { transfer_timestamp_ms } "
+                 "relationshipProperties { transferTimestampMs } "
                  "(numeric epoch milliseconds)",
                  BASE_CONFIG + ", relationshipProperties: "
-                 "{ transfer_timestamp_ms: transfer_timestamp_ms }",
+                 "{ transferTimestampMs: transferTimestampMs }",
                  with_clause=TIMESTAMP_MS_WITH),
         Scenario("D_rel_both",
-                 "relationshipProperties { amount, transfer_timestamp_ms }",
+                 "relationshipProperties { amount, transferTimestampMs }",
                  BASE_CONFIG
                  + ", relationshipProperties: "
-                 "{ amount: t.amount, transfer_timestamp_ms: transfer_timestamp_ms }",
+                 "{ amount: t.amount, transferTimestampMs: transferTimestampMs }",
                  weight_prop="amount", with_clause=TIMESTAMP_MS_WITH),
     ]
     if node_num is not None:
@@ -186,7 +186,7 @@ def run_probe(args: argparse.Namespace) -> bool:
 
     print(f"Connecting to {uri} ...")
     with GraphDatabase.driver(uri, auth=auth) as driver:
-        driver.verify_connectivity()
+        verify_or_exit(driver, uri)
 
         # Window cutoff from the dataset max (data ends in the past), passed as $since.
         if args.since_hours is not None:
@@ -197,7 +197,7 @@ def run_probe(args: argparse.Namespace) -> bool:
             window_label = f"last {args.since_days}d"
         max_transfer, _ = data_max_dates(driver)
         since = max_transfer.to_native() - window
-        print(f"Connected. Window: {window_label}, transfer_timestamp >= {since}.")
+        print(f"Connected. Window: {window_label}, transferTimestamp >= {since}.")
 
         sized = run_statement(driver, f"size window (count edges, {window_label})",
                               COUNT_WINDOW, {"since": since})

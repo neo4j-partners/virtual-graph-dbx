@@ -19,23 +19,25 @@ from queries import Query, Row
 
 
 def data_max_dates(driver: Driver) -> tuple[DateTime, Date]:
-    """Return the dataset's max transfer timestamp and max account opened_date.
+    """Return the dataset's max transfer timestamp and max account openedDate.
 
     These anchor the "recent" windows so they land inside the synthetic dataset
     (which ends 2024-03-30) instead of around an empty present day. Exits with a clear
-    message when the graph has no transfers or no accounts.
+    message when either max is null.
     """
     rec, _, _ = driver.execute_query(
-        "MATCH ()-[t:TRANSFERRED_TO]->() RETURN max(t.transfer_timestamp) AS mx"
+        "MATCH ()-[t:TRANSFERRED_TO]->() RETURN max(t.transferTimestamp) AS mx"
     )
-    max_transfer = first_row(rec, "max(transfer_timestamp)")["mx"]
+    max_transfer = first_row(rec, "max(transferTimestamp)")["mx"]
     rec, _, _ = driver.execute_query(
-        "MATCH (a:Account) RETURN max(a.opened_date) AS mx"
+        "MATCH (a:Account) RETURN max(a.openedDate) AS mx"
     )
-    max_opened = first_row(rec, "max(opened_date)")["mx"]
+    max_opened = first_row(rec, "max(openedDate)")["mx"]
     if max_transfer is None or max_opened is None:
-        sys.exit("The graph has no transfers or no accounts, so the recent windows "
-                 "cannot be anchored. Check the Virtual Graph mapping and tables.")
+        sys.exit("max(t.transferTimestamp) or max(a.openedDate) came back null, so "
+                 "the recent windows cannot be anchored. Either the tables are empty, "
+                 "or the Virtual Graph model does not map transfer_timestamp to "
+                 "transferTimestamp and opened_date to openedDate.")
     return max_transfer, max_opened
 
 
@@ -66,7 +68,7 @@ def run_cypher(driver: Driver, cypher: str, params: dict[str, object],
         driver.session() as session,
         session.begin_transaction(timeout=timeout) as tx,
     ):
-        result = tx.run(cypher, **params)
+        result = tx.run(cypher, parameters=params)
         return [record.data() for record in result]
 
 
@@ -119,6 +121,17 @@ def driver_error(exc: DriverError) -> str:
     hint = (". Likely the 60s Bolt read timeout, or the warehouse is too small"
             if isinstance(cause, TimeoutError) else "")
     return f"{type(exc).__name__}: {exc}{suffix}{hint}"
+
+
+def verify_or_exit(driver: Driver, uri: str) -> None:
+    """Check that ``driver`` can reach the database, or exit with one line.
+
+    A wrong password or an unreachable URI would otherwise end in a traceback.
+    """
+    try:
+        driver.verify_connectivity()
+    except (Neo4jError, DriverError) as exc:
+        sys.exit(f"Could not connect to {uri}: {query_error(exc, indent=' ')}")
 
 
 def query_error(exc: Neo4jError | DriverError, indent: str = "  ") -> str:

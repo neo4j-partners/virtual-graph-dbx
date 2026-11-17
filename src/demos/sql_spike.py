@@ -24,8 +24,8 @@ Flow:
 3. Print the confirmatory metrics and the zero-spill headline.
 
 Connection details (profile, catalog, schema, warehouse) come from the project
-``.env`` via ``load_databricks_config``. The warehouse defaults to the backing VG
-warehouse, overridable with ``VG_BACKING_WAREHOUSE_ID`` or ``--warehouse``.
+``.env`` via ``load_databricks_config``. The warehouse is the one behind the Virtual
+Graph. Set it with ``VG_BACKING_WAREHOUSE_ID`` or ``--warehouse``. It has no default.
 
 The SDK imports are local to the functions that use them, so the other demos run
 without the ``history`` extra installed.
@@ -38,7 +38,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from connection import load_databricks_config
+from connection import MISSING_WAREHOUSE, load_databricks_config
 
 if TYPE_CHECKING:
     from databricks.sdk import WorkspaceClient
@@ -96,15 +96,16 @@ def run_sql(client: WorkspaceClient, warehouse_id: str, statement: str, *,
     later from query history.
 
     On the client ``timeout`` the statement is cancelled server-side, so it stops
-    billing the warehouse. An SDK API error or a network failure is re-raised as
-    ``SqlError``, so callers print one clean line rather than a traceback.
+    billing the warehouse. An SDK API error, a network failure, or a failed token
+    refresh is re-raised as ``SqlError``, so callers print one clean line rather than
+    a traceback. The SDK raises a failed refresh as ``ValueError`` or ``OSError``. A
+    ``requests`` exception and ``TimeoutError`` are both ``OSError`` subclasses.
     """
     from databricks.sdk.errors import DatabricksError
     from databricks.sdk.service.sql import (
         ExecuteStatementRequestOnWaitTimeout,
         StatementState,
     )
-    from requests.exceptions import RequestException
 
     t0 = time.perf_counter()
     statement_id = None
@@ -122,7 +123,7 @@ def run_sql(client: WorkspaceClient, warehouse_id: str, statement: str, *,
             time.sleep(poll_interval)
             resp = client.statement_execution.get_statement(statement_id)
             state = resp.status.state
-    except (DatabricksError, RequestException, TimeoutError) as exc:
+    except (DatabricksError, OSError, ValueError) as exc:
         where = f"statement {statement_id}" if statement_id else "submit"
         raise SqlError(f"{where} failed ({type(exc).__name__}: {exc})") from exc
     wall = time.perf_counter() - t0
@@ -226,26 +227,34 @@ def tagged(label: str, size: int, sql: str) -> str:
 
 
 def run_c_queries(client: WorkspaceClient, warehouse: str, table: str,
-                  size: int) -> list[RunRecord]:
-    """Run C1/C2/C3 against ``table`` at ramp ``size``; return their records."""
+                  size: int) -> tuple[list[RunRecord], int]:
+    """Run C1/C2/C3 against ``table`` at ramp ``size``.
+
+    Returns the records of the queries that ran and the number that failed. A failed
+    query is printed and skipped, so the others still run.
+    """
     records: list[RunRecord] = []
+    failed = 0
     for label, sql in c_queries(table):
         try:
             res = run_sql(client, warehouse, tagged(label, size, sql))
         except SqlError as exc:
             print(f"    {label}: ERROR {exc}")
+            failed += 1
             continue
         inner = res.rows[0][0] if res.rows else "?"
         print(f"    {label}: OK {res.wall_clock_s:.1f}s client, "
               f"inner group count {inner}")
         records.append(
             RunRecord(label, size, res.statement_id, res.wall_clock_s, inner))
-    return records
+    return records, failed
 
 
 def table_row_count(client: WorkspaceClient, warehouse: str, table: str) -> int:
     """Current row count of ``account_links_large`` (read-only mode reports it)."""
     res = run_sql(client, warehouse, f"SELECT count(*) FROM {table}")
+    if not res.rows:
+        raise SqlError(f"SELECT count(*) on {table} returned no rows")
     return int(res.rows[0][0])
 
 
@@ -308,10 +317,11 @@ def await_history(client: WorkspaceClient, warehouse: str, start_ms: int,
 
     A failed pull is reported and polling continues. The SDK raises an API error as a
     ``DatabricksError`` subclass, a network failure as a ``requests`` exception, and
-    ``TimeoutError`` once its own transient-error retries run out.
+    ``TimeoutError`` once its own transient-error retries run out. Those two are
+    ``OSError`` subclasses. A failed token refresh raises ``ValueError`` or
+    ``OSError``.
     """
     from databricks.sdk.errors import DatabricksError
-    from requests.exceptions import RequestException
 
     print(f"\n  Query history can lag up to a few minutes. Polling every "
           f"{poll_interval / 60:g} min until all {len(want_ids)} statements land "
@@ -324,7 +334,7 @@ def await_history(client: WorkspaceClient, warehouse: str, start_ms: int,
         end_ms = int(time.time() * 1000) + 2_000
         try:
             found = pull_history(client, warehouse, start_ms, end_ms, want_ids)
-        except (DatabricksError, RequestException, TimeoutError) as exc:
+        except (DatabricksError, OSError, ValueError) as exc:
             print(f"  [check {check}] history pull failed "
                   f"({type(exc).__name__}: {exc})")
             found = {}
@@ -404,11 +414,13 @@ def print_spill_report(records: list[RunRecord], found: dict[str, HistRow]) -> b
 def run_spike(args: argparse.Namespace) -> bool:
     """Run the C-query workload over the ramp and confirm zero spill from history.
 
-    Returns True when the C-queries ran, and, unless ``--skip-history`` is set, every
-    statement landed in history with zero spill. The CLI exits 1 otherwise.
+    Returns True when every build and C-query succeeded, and, unless
+    ``--skip-history`` is set, every statement landed in history with zero spill. The
+    CLI exits 1 otherwise. A failed build or query is skipped so the rest still run.
     """
     try:
         from databricks.sdk import WorkspaceClient
+        from databricks.sdk.errors import DatabricksError
     except ImportError:
         print("The 100m demo needs the Databricks SDK. Install the history extra:\n"
               "  uv sync --extra history")
@@ -417,12 +429,15 @@ def run_spike(args: argparse.Namespace) -> bool:
     cfg = load_databricks_config()
     profile = args.profile or cfg.profile
     warehouse = args.warehouse or cfg.warehouse
+    if not warehouse:
+        print(MISSING_WAREHOUSE)
+        return False
     table = f"`{cfg.catalog}`.`{cfg.schema}`.`account_links_large`"
     accounts = f"`{cfg.catalog}`.`{cfg.schema}`.`accounts`"
 
     try:
         client = WorkspaceClient(profile=profile)
-    except (ValueError, OSError) as exc:
+    except (DatabricksError, ValueError, OSError) as exc:
         print(f"Could not build a Databricks client ({exc}). Check the "
               "DATABRICKS_CONFIG_PROFILE in .env or pass --profile.")
         return False
@@ -435,6 +450,7 @@ def run_spike(args: argparse.Namespace) -> bool:
     start_ms = int(time.time() * 1000) - 60_000
 
     records: list[RunRecord] = []
+    failed = 0
     if args.build:
         sizes = args.sizes or RAMP_SIZES
         print(f"\n--build: rebuilding {table} (destructive CREATE OR REPLACE) at "
@@ -446,9 +462,12 @@ def run_spike(args: argparse.Namespace) -> bool:
                                 tagged("build", size, build_sql(table, accounts, size)))
             except SqlError as exc:
                 print(f"    build {size:,}: ERROR {exc}. Skipping its queries.")
+                failed += 1
                 continue
             print(f"    build: OK {built.wall_clock_s:.1f}s client wall-clock.")
-            records.extend(run_c_queries(client, warehouse, table, size))
+            ran, size_failed = run_c_queries(client, warehouse, table, size)
+            records.extend(ran)
+            failed += size_failed
     else:
         try:
             size = table_row_count(client, warehouse, table)
@@ -458,7 +477,8 @@ def run_spike(args: argparse.Namespace) -> bool:
             return False
         print(f"\nRead-only: querying the existing table ({size:,} rows). "
               "Use --build to rebuild the full 100K-to-100M ramp.")
-        records.extend(run_c_queries(client, warehouse, table, size))
+        ran, failed = run_c_queries(client, warehouse, table, size)
+        records.extend(ran)
 
     if not records:
         print("\nNo queries ran successfully. Nothing to confirm in history.")
@@ -468,11 +488,20 @@ def run_spike(args: argparse.Namespace) -> bool:
         print(f"\n--skip-history: ran {len(records)} statement(s) but not waiting for "
               "the history lag (up to a few minutes). Spill not confirmed. Rerun "
               "without --skip-history.")
-        return True
+        return report_failures(failed)
 
     want_ids = {rec.statement_id for rec in records}
     found = await_history(client, warehouse, start_ms, want_ids,
                           poll_interval=args.poll_minutes * 60.0,
                           lag_estimate=args.history_lag_minutes * 60.0,
                           max_wait=args.max_wait_minutes * 60.0)
-    return print_spill_report(records, found)
+    confirmed = print_spill_report(records, found)
+    return report_failures(failed) and confirmed
+
+
+def report_failures(failed: int) -> bool:
+    """Print how many builds or queries failed. Return True when none did."""
+    if failed:
+        print(f"\n  {failed} build(s) or query(ies) failed, so this run is incomplete. "
+              "See the ERROR lines above.")
+    return failed == 0

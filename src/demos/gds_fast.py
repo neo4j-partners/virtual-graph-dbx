@@ -2,7 +2,7 @@
 
 The working GDS Session + PageRank path over a small, recent window of the Account
 transfer network, provisioned via the Cypher-projection form of
-``gds.graph.project(...)``. See ``gds-guide.md``.
+``gds.graph.project(...)``. See ``docs/gds-guide.md``.
 """
 
 from __future__ import annotations
@@ -19,17 +19,17 @@ from demos.gds_common import (
     project_with_cleanup,
     run_statement,
 )
-from helpers import data_max_dates
+from helpers import data_max_dates, verify_or_exit
 
 COUNT_WINDOW = """
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= $since
+WHERE t.transferTimestamp >= $since
 RETURN count(t) AS edges
 """
 
 PROJECT_WINDOW = """
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= $since
+WHERE t.transferTimestamp >= $since
 RETURN gds.graph.project(
   $graph,
   src,
@@ -51,14 +51,14 @@ ORDER BY score DESC
 LIMIT $limit
 """
 
-# A streamed GDS ``nodeId`` packs the source ``account_id`` into its low 50 bits,
+# A streamed GDS ``nodeId`` packs the source ``accountId`` into its low 50 bits,
 # shifted left by one.
 _NODE_ID_LOW_BITS = (1 << 50) - 1
 _DEFAULT_GRAPH = "account_transfers_recent"
 
 
 def decode_account_id(node_id: int) -> int:
-    """Decode a streamed GDS ``nodeId`` back to the Virtual Graph ``account_id``."""
+    """Decode a streamed GDS ``nodeId`` back to the Virtual Graph ``accountId``."""
     return (node_id & _NODE_ID_LOW_BITS) >> 1
 
 
@@ -68,7 +68,7 @@ def run_gds(args: argparse.Namespace) -> bool:
 
     print(f"Connecting to {uri} ...")
     with GraphDatabase.driver(uri, auth=auth) as driver:
-        driver.verify_connectivity()
+        verify_or_exit(driver, uri)
 
         # Step 0: find the window cutoff from the dataset's max transfer timestamp
         # (a cheap max() scan). The data ends in the past, so anchor to its max, not
@@ -86,7 +86,7 @@ def run_gds(args: argparse.Namespace) -> bool:
         since = max_transfer.to_native() - window
         graph = args.graph if args.graph is not None else new_graph_name(_DEFAULT_GRAPH)
         print(f"Connected. Window: {window_label}, "
-              f"transfer_timestamp >= {since} (data max {max_transfer.to_native()}).")
+              f"transferTimestamp >= {since} (data max {max_transfer.to_native()}).")
         print(f"Target graph '{graph}', memory={args.memory}.")
 
         # Step 1: cheap sizing query, no session. See how big the projection will be.
@@ -144,7 +144,7 @@ def run_gds(args: argparse.Namespace) -> bool:
             )
             if ranked:
                 print(f"\n  Top {len(ranked)} accounts by PageRank (recent window):")
-                print("  nodeId                account_id  score")
+                print("  nodeId                accountId   score")
                 print("  --------------------  ----------  ----------")
                 for row in ranked:
                     account_id = decode_account_id(row["nodeId"])

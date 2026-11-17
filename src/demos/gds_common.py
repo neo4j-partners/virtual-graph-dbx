@@ -1,7 +1,7 @@
-"""Shared GDS helpers used by the fast-gds and gds-probe demos.
+"""Shared GDS helpers used by the fast-gds, gds-probe and gds-examples demos.
 
 Holds the single-statement runner, the graph-drop Cypher, and the projection runner that
-cleans up after a failed projection. Both GDS paths need them.
+cleans up after a failed projection. All three GDS demos need them.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def run_statement(driver: Driver, label: str, cypher: str,
     t0 = time.perf_counter()
     try:
         with driver.session() as session:
-            rows = [record.data() for record in session.run(cypher, **params)]
+            rows = [record.data() for record in session.run(cypher, parameters=params)]
     except (Neo4jError, DriverError) as exc:
         elapsed = time.perf_counter() - t0
         print(f"  FAILED after {elapsed:.1f}s: {query_error(exc)}")

@@ -59,7 +59,7 @@ relationships between accounts from a recent time window:
 
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
+WHERE t.transferTimestamp >= datetime("2024-03-23T23:58:00Z")
 RETURN gds.graph.project(
   'transfers',
   src,
@@ -87,7 +87,7 @@ graph. This projection keeps the transfer amount so an algorithm can use it as a
 
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
+WHERE t.transferTimestamp >= datetime("2024-03-23T23:58:00Z")
 RETURN gds.graph.project(
   'transfersWeighted',
   src,
@@ -134,7 +134,7 @@ GDS in-memory graph cannot hold a temporal or string property, so adding one to 
 
 ```
 The property `relationship.ts` contained a value of type `DateTime`, which is not supported.
-The property `sourceNode.account_hash` contained a value of type `String`, which is not supported.
+The property `sourceNode.accountHash` contained a value of type `String`, which is not supported.
 ```
 
 So `relationshipProperties: { amount: t.amount }` projects and is usable as a
@@ -143,8 +143,8 @@ So `relationshipProperties: { amount: t.amount }` projects and is usable as a
 
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= $since
-WITH src, dst, t, toInteger(t.transfer_timestamp) * 1000 AS transfer_timestamp_ms
+WHERE t.transferTimestamp >= $since
+WITH src, dst, t, toInteger(t.transferTimestamp) * 1000 AS transferTimestampMs
 RETURN gds.graph.project(
   $graph,
   src,
@@ -152,7 +152,7 @@ RETURN gds.graph.project(
   { sourceNodeLabels: labels(src),
     targetNodeLabels: labels(dst),
     relationshipType: type(t),
-    relationshipProperties: { transfer_timestamp_ms: transfer_timestamp_ms } },
+    relationshipProperties: { transferTimestampMs: transferTimestampMs } },
   { memory: $memory }
 ) AS result
 ```
@@ -164,7 +164,7 @@ values too, but the server flags it with the `01N52` unknown-property warning. T
 conversion has to go through the `WITH`, because `toInteger()` on a timestamp inside the
 config map fails with `22N38`. Stock Cypher rejects `toInteger()` on a timestamp, so this
 form is specific to the Virtual Graph. Keep string identifiers such as
-`account_hash` outside the GDS projection and join them to streamed account IDs in the
+`accountHash` outside the GDS projection and join them to streamed account IDs in the
 application when needed. The `gds-probe` demo (`src/demos/gds_probe.py`, run with
 `uv run vg-demo --demo gds-probe`) projects the supported numeric values and skips
 non-numeric node properties before provisioning. This is standard GDS typing behavior.
@@ -197,11 +197,11 @@ projecting the `amount` property.
 
 The standalone `CALL gds.<algorithm>.stream(...)` form works. The stream returns
 GDS-internal `nodeId`s. Each one encodes the source table in its top bits. Its low 50
-bits hold the source ID shifted left by one. To recover the `account_id`, mask the low 50
+bits hold the source ID shifted left by one. To recover the `accountId`, mask the low 50
 bits and shift right by one:
 
 ```
-account_id = (nodeId & (2^50 - 1)) >> 1
+accountId = (nodeId & (2^50 - 1)) >> 1
 ```
 
 The formula was checked against in-degree on live PageRank runs. On a 2-hour window, the
@@ -209,7 +209,7 @@ accounts with the highest scores matched the accounts with the highest in-window
 exactly. On the 7-day window, the top 10 accounts each have 18 to 24 incoming transfers,
 against a mean of about 2.4. Six of them are in the top 17 by in-degree. PageRank weighs
 who sends to an account, not only how many, so a close but inexact match is expected. The
-`fast-gds` demo applies this formula and prints the decoded `account_id` next to each
+`fast-gds` demo applies this formula and prints the decoded `accountId` next to each
 streamed `nodeId`.
 
 ## No write-back
@@ -292,6 +292,7 @@ candidates. None of them has been built or tested on the Virtual Graph yet.
   a plain Cypher query on the Virtual Graph, such as the pass-through mule check. GDS
   finds the suspects, and Cypher explains them.
 
-A single `gds-examples` demo could run money-flow PageRank, WCC, Louvain, and the GDS then
-Cypher step on one 7-day session. It would cost one provisioning plus a few seconds for
-each algorithm.
+The `gds-examples` demo runs PageRank, WCC and Louvain on one GDS Session. It projects
+every transfer, with no time window. It does not include the GDS then Cypher step. See
+[`running-demos.md`](running-demos.md#generate-a-larger-graph-and-run-gds-examples-optional)
+for how to size and run it.

@@ -60,7 +60,7 @@ class QueryDefinitionTests(unittest.TestCase):
         for q in queries.BASIC_QUERIES:
             with self.subTest(q=q.number):
                 self.assertLessEqual(params_of(q.cypher),
-                                     {"account_id", "merchant_id"})
+                                     {"accountId", "merchantId"})
 
     def test_enum_like_fields(self) -> None:
         for q in queries.QUERIES:
@@ -83,17 +83,17 @@ class QueryDefinitionTests(unittest.TestCase):
         self.assertEqual([q.number for q in queries.QUERIES if q.client_filter], [7])
         self.assertEqual([q.number for q in queries.QUERIES if q.row_transform],
                          [10])
-        self.assertTrue(by[7].client_filter({"merchant_count": 19}))
-        self.assertFalse(by[7].client_filter({"merchant_count": 20}))
-        self.assertIn("account_id", by[7].enrich_cypher)
+        self.assertTrue(by[7].client_filter({"merchantCount": 19}))
+        self.assertFalse(by[7].client_filter({"merchantCount": 20}))
+        self.assertIn("accountId", by[7].enrich_cypher)
 
     def test_avg_turnaround_to_hours(self) -> None:
-        row = {"avg_turnaround_s": 88_200}
+        row = {"avgTurnaroundSeconds": 88_200}
         queries.avg_turnaround_to_hours(row)
-        self.assertEqual(row, {"avg_turnaround_hours": 24.5})
-        row = {"avg_turnaround_s": 5400.4}
+        self.assertEqual(row, {"avgTurnaroundHours": 24.5})
+        row = {"avgTurnaroundSeconds": 5400.4}
         queries.avg_turnaround_to_hours(row)
-        self.assertEqual(row["avg_turnaround_hours"], 1.5)
+        self.assertEqual(row["avgTurnaroundHours"], 1.5)
 
     def test_notes_follow_the_style_rules(self) -> None:
         """Notes carry no em or en dashes, no "e.g." and no prose semicolons."""
@@ -105,15 +105,15 @@ class QueryDefinitionTests(unittest.TestCase):
 
 class MergeEnrichmentTests(unittest.TestCase):
     def test_merge_with_default(self) -> None:
-        rows = [{"account_id": 1}, {"account_id": 2}]
-        fraud.merge_enrichment(rows, [{"account_id": 1, "merchant_count": 7}],
-                               "account_id", {"merchant_count": 0})
-        self.assertEqual(rows, [{"account_id": 1, "merchant_count": 7},
-                                {"account_id": 2, "merchant_count": 0}])
+        rows = [{"accountId": 1}, {"accountId": 2}]
+        fraud.merge_enrichment(rows, [{"accountId": 1, "merchantCount": 7}],
+                               "accountId", {"merchantCount": 0})
+        self.assertEqual(rows, [{"accountId": 1, "merchantCount": 7},
+                                {"accountId": 2, "merchantCount": 0}])
 
     def test_extra_enrich_rows_ignored(self) -> None:
         rows: list[dict] = []
-        fraud.merge_enrichment(rows, [{"account_id": 9, "m": 1}], "account_id",
+        fraud.merge_enrichment(rows, [{"accountId": 9, "m": 1}], "accountId",
                                {"m": 0})
         self.assertEqual(rows, [])
 
@@ -172,23 +172,23 @@ class RunQueryTests(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_courier_merge_and_filter(self) -> None:
-        main = [{"account_id": 1, "transfer_count": 150},
-                {"account_id": 2, "transfer_count": 120},
-                {"account_id": 3, "transfer_count": 110}]
-        enrich = [{"account_id": 1, "merchant_count": 25},
-                  {"account_id": 2, "merchant_count": 3}]
+        main = [{"accountId": 1, "transferCount": 150},
+                {"accountId": 2, "transferCount": 120},
+                {"accountId": 3, "transferCount": 110}]
+        enrich = [{"accountId": 1, "merchantCount": 25},
+                  {"accountId": 2, "merchantCount": 3}]
         out, rc, _ = self.run_q(7, [main, enrich])
         self.assertEqual(rc.call_count, 2)
         self.assertIn("3 server row(s), 2 pass the client-side threshold", out)
 
     def test_row_transform(self) -> None:
-        rows = [{"account_id": 1, "rapid_pairs": 60, "avg_turnaround_s": 7200}]
+        rows = [{"accountId": 1, "rapidPairs": 60, "avgTurnaroundSeconds": 7200}]
         out, _, _ = self.run_q(10, lambda *a: rows)
-        self.assertIn("avg_turnaround_hours", out)
+        self.assertIn("avgTurnaroundHours", out)
         self.assertIn("2.0", out)
 
     def test_rows_zero_reports_count(self) -> None:
-        out, _, _ = self.run_q(1, lambda *a: [{"account_id": 1}] * 4, rows=0)
+        out, _, _ = self.run_q(1, lambda *a: [{"accountId": 1}] * 4, rows=0)
         self.assertIn("4 matching row(s) not shown", out)
 
     def test_errors_are_reported_and_return_false(self) -> None:
@@ -272,7 +272,7 @@ class BasicTests(unittest.TestCase):
         ):
             self.assertTrue(basic.run_basic(MagicMock(), 10, 1.0))
         self.assertEqual(rbq.call_count, len(queries.BASIC_QUERIES))
-        self.assertEqual(rbq.call_args.args[4], {"account_id": 7, "merchant_id": 8})
+        self.assertEqual(rbq.call_args.args[4], {"accountId": 7, "merchantId": 8})
 
     def test_run_basic_reports_failure(self) -> None:
         results = [True] * len(queries.BASIC_QUERIES)

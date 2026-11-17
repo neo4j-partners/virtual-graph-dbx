@@ -1,0 +1,22 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AuraVirtualGraphRead",
+      "Effect": "Allow",
+      "Action": [
+        "s3tables:GetTableBucket",
+        "s3tables:ListNamespaces",
+        "s3tables:GetNamespace",
+        "s3tables:ListTables",
+        "s3tables:GetTable",
+        "s3tables:GetTableMetadataLocation",
+        "s3tables:GetTableData"
+      ],
+      "Resource": [
+        "arn:aws:s3tables:<region>:<account-id>:bucket/<table-bucket>",
+        "arn:aws:s3tables:<region>:<account-id>:bucket/<table-bucket>/table/*"
+      ]
+    }
+  ]
+}

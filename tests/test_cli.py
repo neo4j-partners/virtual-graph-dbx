@@ -245,6 +245,16 @@ class ConnectionTests(unittest.TestCase):
                 connection.load_connection(f2)
             self.assertIn("NEO4J_USERNAME, NEO4J_PASSWORD", str(cm.exception.code))
 
+    def test_load_connection_does_not_export(self) -> None:
+        f = self.envfile("NEO4J_URI=bolt://file\nNEO4J_USERNAME=u\nNEO4J_PASSWORD=p\n"
+                         "DATABRICKS_HOST=h\n")
+        with patch.dict(os.environ, self.clean_env(), clear=True):
+            os.environ["NEO4J_URI"] = "bolt://shell"
+            self.assertEqual(connection.load_connection(f),
+                             ("bolt://file", ("u", "p")))
+            self.assertNotIn("DATABRICKS_HOST", os.environ)
+            self.assertEqual(os.environ["NEO4J_URI"], "bolt://shell")
+
     def test_databricks_config_precedence_and_no_export(self) -> None:
         f = self.envfile("DATABRICKS_PROFILE=p2\nSCHEMA=s2\nDATABRICKS_HOST=h\n")
         with patch.dict(os.environ, self.clean_env(), clear=True):
@@ -260,7 +270,7 @@ class ConnectionTests(unittest.TestCase):
         with patch.dict(os.environ, self.clean_env(), clear=True):
             cfg = connection.load_databricks_config(f)
         self.assertEqual(cfg, connection.DatabricksConfig(
-            "DEFAULT", "virtual-graph-dbx", "vg-schema", "b0fffb8e3255bf85"))
+            "DEFAULT", "virtual-graph-dbx", "vg-schema", None))
 
     def test_warehouse_override_from_env_file_and_shell(self) -> None:
         f = self.envfile("VG_BACKING_WAREHOUSE_ID=fromfile\n"
@@ -273,11 +283,17 @@ class ConnectionTests(unittest.TestCase):
                 connection.load_databricks_config(self.envfile("")).warehouse,
                 "fromshell")
 
+    def test_empty_file_value_keeps_the_shell_value(self) -> None:
+        f = self.envfile("VG_BACKING_WAREHOUSE_ID=\n")
+        with patch.dict(os.environ, self.clean_env(), clear=True):
+            os.environ["VG_BACKING_WAREHOUSE_ID"] = "shellwh"
+            self.assertEqual(connection.load_databricks_config(f).warehouse,
+                             "shellwh")
+
     def test_databricks_warehouse_id_is_ignored(self) -> None:
         f = self.envfile("DATABRICKS_WAREHOUSE_ID=other\n")
         with patch.dict(os.environ, self.clean_env(), clear=True):
-            self.assertEqual(connection.load_databricks_config(f).warehouse,
-                             connection.VG_BACKING_WAREHOUSE)
+            self.assertIsNone(connection.load_databricks_config(f).warehouse)
 
 
 class ProbeTests(unittest.TestCase):

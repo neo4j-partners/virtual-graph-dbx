@@ -26,7 +26,7 @@ from neo4j import GraphDatabase
 from neo4j.exceptions import DriverError, Neo4jError
 
 from connection import load_connection
-from helpers import query_error
+from helpers import query_error, verify_or_exit
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,7 +42,7 @@ def main() -> None:
     uri, auth = load_connection()
 
     with GraphDatabase.driver(uri, auth=auth) as driver:
-        driver.verify_connectivity()
+        verify_or_exit(driver, uri)
         print(f"connected: {uri}", flush=True)
         t0 = time.perf_counter()
         try:

@@ -1,6 +1,6 @@
 """Fraud demo (``--demo fraud``).
 
-The fraud-signal queries 1-10 from ``finding-fraud.md``. Databricks runs each
+The fraud-signal queries 1-10 from ``docs/finding-fraud.md``. Databricks runs each
 ``GROUP BY``, and the Neo4j engine applies each threshold (a ``WHERE`` on a second
 ``WITH``), orders and limits. "Recent" windows are passed as a precomputed ``$since``
 parameter. Only the courier

@@ -9,11 +9,16 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from databricks.sdk.errors import DatabricksError
-from databricks.sdk.service.sql import StatementState
-
 from connection import DatabricksConfig
 from demos import sql_spike
+
+try:
+    from databricks.sdk.errors import DatabricksError
+    from databricks.sdk.service.sql import StatementState
+except ImportError:
+    HAS_SDK = False
+else:
+    HAS_SDK = True
 
 
 def quiet() -> contextlib.redirect_stdout:
@@ -25,6 +30,7 @@ def status(state: StatementState) -> SimpleNamespace:
                            statement_id="s1", manifest=None, result=None)
 
 
+@unittest.skipUnless(HAS_SDK, "needs the history extra (databricks-sdk)")
 class RunSqlTests(unittest.TestCase):
     def test_timeout_cancels_the_statement(self) -> None:
         client = MagicMock()
@@ -43,6 +49,15 @@ class RunSqlTests(unittest.TestCase):
         with self.assertRaises(sql_spike.SqlError) as cm:
             sql_spike.run_sql(client, "wh", "SELECT 1")
         self.assertIn("submit failed (DatabricksError", str(cm.exception))
+
+    def test_token_refresh_error_becomes_sql_error(self) -> None:
+        for exc in (ValueError("token expired and refresh token is not set"),
+                    OSError("cannot get access token")):
+            client = MagicMock()
+            client.statement_execution.execute_statement.side_effect = exc
+            with self.subTest(exc=type(exc).__name__), \
+                    self.assertRaises(sql_spike.SqlError):
+                sql_spike.run_sql(client, "wh", "SELECT 1")
 
     def test_succeeded_returns_rows(self) -> None:
         resp = status(StatementState.SUCCEEDED)
@@ -68,7 +83,22 @@ class CQueryTests(unittest.TestCase):
         self.assertIn("sum(avg_amount)", c1)
         self.assertNotIn("avg(avg_amount)", c1)
 
+    def test_failed_query_is_counted_and_the_rest_still_run(self) -> None:
+        ok = sql_spike.SqlResult("s1", ["n"], [["7"]], 1.0)
+        with patch.object(sql_spike, "run_sql",
+                          side_effect=[ok, sql_spike.SqlError("boom"), ok]), quiet():
+            records, failed = sql_spike.run_c_queries(MagicMock(), "wh", "t", 5)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(failed, 1)
 
+    def test_empty_row_count_is_an_error(self) -> None:
+        empty = sql_spike.SqlResult("s1", ["n"], [], 1.0)
+        with patch.object(sql_spike, "run_sql", return_value=empty), \
+                self.assertRaises(sql_spike.SqlError):
+            sql_spike.table_row_count(MagicMock(), "wh", "t")
+
+
+@unittest.skipUnless(HAS_SDK, "needs the history extra (databricks-sdk)")
 class PullHistoryTests(unittest.TestCase):
     def info(self, qid: str, spill: int) -> SimpleNamespace:
         metrics = SimpleNamespace(execution_time_ms=10, rows_read_count=100,
@@ -113,6 +143,7 @@ class SpillReportTests(unittest.TestCase):
         self.assertFalse(self.report({"a": sql_spike.HistRow(0, 0, 0, True)})[0])
 
 
+@unittest.skipUnless(HAS_SDK, "needs the history extra (databricks-sdk)")
 class RunSpikeTests(unittest.TestCase):
     def args(self, **kw) -> argparse.Namespace:
         base = {"profile": None, "warehouse": None, "build": False, "sizes": None,
@@ -128,7 +159,7 @@ class RunSpikeTests(unittest.TestCase):
             patch("databricks.sdk.WorkspaceClient"),
             patch.object(sql_spike, "table_row_count", return_value=5),
             patch.object(sql_spike, "run_c_queries",
-                         **patches.get("rcq", {"return_value": [rec]})) as rcq,
+                         **patches.get("rcq", {"return_value": ([rec], 0)})) as rcq,
             quiet(),
         ):
             return sql_spike.run_spike(args), rcq
@@ -142,8 +173,21 @@ class RunSpikeTests(unittest.TestCase):
         _, rcq = self.spike(self.args(warehouse="flagwh"))
         self.assertEqual(rcq.call_args.args[1], "flagwh")
 
+    def test_missing_warehouse_is_false(self) -> None:
+        cfg = DatabricksConfig("p", "c", "s", None)
+        buf = io.StringIO()
+        with patch.object(sql_spike, "load_databricks_config", return_value=cfg), \
+                contextlib.redirect_stdout(buf):
+            self.assertFalse(sql_spike.run_spike(self.args()))
+        self.assertIn("VG_BACKING_WAREHOUSE_ID", buf.getvalue())
+
+    def test_partial_failure_is_false(self) -> None:
+        rec = sql_spike.RunRecord("C1", 5, "a", 1.0, "1")
+        ok, _ = self.spike(self.args(), rcq={"return_value": ([rec], 1)})
+        self.assertFalse(ok)
+
     def test_no_records_is_false(self) -> None:
-        ok, _ = self.spike(self.args(), rcq={"return_value": []})
+        ok, _ = self.spike(self.args(), rcq={"return_value": ([], 0)})
         self.assertFalse(ok)
 
     def test_history_result_is_returned(self) -> None:

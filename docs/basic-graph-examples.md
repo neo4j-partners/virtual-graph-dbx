@@ -3,7 +3,7 @@
 Warm-up queries for the Finance Genie Virtual Graph: simple counts and small
 relationship traversals that show the value of the graph without any fraud
 logic. They are the queries to open a demo with, before the structural fraud
-signals in [`finding-fraud.md`](docs/finding-fraud.md).
+signals in [`finding-fraud.md`](finding-fraud.md).
 
 Every query here was verified live against the Aura Virtual Graph backed by the
 Databricks Silver tables. The `basic` demo runs all 15 of them:
@@ -15,7 +15,24 @@ uv run vg-demo --demo basic
 The dataset is 25,000 accounts, 7,500 merchants, 300,000 transfers, and 250,000
 merchant transactions. Node labels are `:Account` and `:Merchant`, backed by the
 `accounts` and `merchants` tables. If your model shows `:accounts` / `:merchants`, rename
-the labels in the Aura model as described in section 5 of [`virtual-graph.md`](virtual-graph.md).
+the labels in the Aura model as described in section 3 of [`vg-model.md`](vg-model.md#3-define-your-schema).
+
+## Run them in the Aura console
+
+Paste any query into the Query tab of the Aura Workspace and run one statement at a time.
+Table queries return rows. Graph queries return nodes and relationships, and the console
+draws them as a picture. Queries 7 to 11 take `$accountId` and `$merchantId` parameters.
+In the console, replace them with literal ids, such as account 17813 and merchant 1:
+
+```cypher
+MATCH (a:Account {accountId: 17813})-[t:TRANSACTED_WITH]->(m:Merchant)
+RETURN a, t, m
+LIMIT 25
+```
+
+The numbers in this guide are for the base Finance Genie data. They change after
+`vg-generate` appends rows. See
+[`running-demos.md`](running-demos.md#generate-a-larger-graph-and-run-gds-examples-optional).
 
 ## How to read the two kinds
 
@@ -28,13 +45,13 @@ The queries split into two kinds.
   nodes and edges as a graph. The CLI demo only reports the row count for these, so run
   them in the Workspace to see the visualization.
 
-Queries 7 to 11 anchor on a specific `account_id` or `merchant_id`. Anchoring pushes a
+Queries 7 to 11 anchor on a specific `accountId` or `merchantId`. Anchoring pushes a
 selective filter down to Databricks, which keeps the query fast and the result small
 enough to render. Queries 13 to 15 run without an anchor to show how `LIMIT` pushes down.
 The demo prints which anchor ids it picked so you can paste the same query into the
 Workspace. It anchors on account 17813 and merchant 1 by default, and the numbers below are
 measured against them. If either id is missing, the demo falls back to the lowest
-`account_id` with an outgoing transfer or the lowest `merchant_id`. Swap in any id you like.
+`accountId` with an outgoing transfer or the lowest `merchantId`. Swap in any id you like.
 
 Every query whose `LIMIT` cuts its result sorts first, so the same rows come back on every
 run. Query 7 returns all 12 of the anchor's merchant edges, so it needs no sort. Query 15 is
@@ -73,8 +90,8 @@ queries 5 and 6.
 
 ```cypher
 MATCH (a:Account)
-RETURN a.account_type AS account_type, count(*) AS accounts
-ORDER BY accounts DESC, account_type ASC
+RETURN a.accountType AS accountType, count(*) AS accounts
+ORDER BY accounts DESC, accountType ASC
 ```
 
 ### 4. Accounts by region
@@ -103,15 +120,15 @@ at 95 customers in places 9 to 11, across the `LIMIT 10` cut, so the query sorts
 
 ```cypher
 MATCH (a:Account)-[:TRANSACTED_WITH]->(m:Merchant)
-RETURN m.merchant_name AS merchant, count(DISTINCT a) AS customers
+RETURN m.merchantName AS merchant, count(DISTINCT a) AS customers
 ORDER BY customers DESC, merchant ASC
 LIMIT 10
 ```
 
 ## Visualizations (graph)
 
-Run these in the Aura Workspace Query tab to see the graph. The `$account_id`
-and `$merchant_id` parameters are the anchors. Replace them with a literal id, or
+Run these in the Aura Workspace Query tab to see the graph. The `$accountId`
+and `$merchantId` parameters are the anchors. Replace them with a literal id, or
 let the demo supply them.
 
 ### 7. Ego network: one account and the merchants it shops at
@@ -121,7 +138,7 @@ fanned out around it. To color the merchants by category, add a rule-based style
 `category` in the Workspace. Anchored, so about a second.
 
 ```cypher
-MATCH (a:Account {account_id: $account_id})-[t:TRANSACTED_WITH]->(m:Merchant)
+MATCH (a:Account {accountId: $accountId})-[t:TRANSACTED_WITH]->(m:Merchant)
 RETURN a, t, m
 LIMIT 25
 ```
@@ -131,12 +148,12 @@ LIMIT 25
 The peer-to-peer view of the same account. The pattern is undirected, and the query
 keeps the 25 most recent transfers, so it shows money flowing both in and out. For the
 demo anchor it returns 9 outgoing and 16 incoming transfers. Transfers with the same
-timestamp sort on `link_id`. About a second.
+timestamp sort on `linkId`. About a second.
 
 ```cypher
-MATCH (a:Account {account_id: $account_id})-[t:TRANSFERRED_TO]-(b:Account)
+MATCH (a:Account {accountId: $accountId})-[t:TRANSFERRED_TO]-(b:Account)
 RETURN a, t, b
-ORDER BY t.transfer_timestamp DESC, t.link_id ASC
+ORDER BY t.transferTimestamp DESC, t.linkId ASC
 LIMIT 25
 ```
 
@@ -144,12 +161,12 @@ LIMIT 25
 
 Flip the ego network around the merchant. One merchant in the center with its
 customers around it. Merchant 1 has 37 customers, and the query keeps the 25 with the
-lowest `account_id`. About a second.
+lowest `accountId`. About a second.
 
 ```cypher
-MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant {merchant_id: $merchant_id})
+MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant {merchantId: $merchantId})
 RETURN a, t, m
-ORDER BY a.account_id, t.txn_id
+ORDER BY a.accountId, t.txnId
 LIMIT 25
 ```
 
@@ -162,11 +179,11 @@ the merchant fan-out small, so it runs in about a second. The anchor has 670 suc
 496 other accounts, and the query keeps the first 25 by merchant and account id.
 
 ```cypher
-MATCH (a:Account {account_id: $account_id})-[t1:TRANSACTED_WITH]->(m:Merchant)
+MATCH (a:Account {accountId: $accountId})-[t1:TRANSACTED_WITH]->(m:Merchant)
       <-[t2:TRANSACTED_WITH]-(b:Account)
 WHERE a <> b
 RETURN a, t1, m, t2, b
-ORDER BY m.merchant_id, b.account_id, t1.txn_id, t2.txn_id
+ORDER BY m.merchantId, b.accountId, t1.txnId, t2.txnId
 LIMIT 25
 ```
 
@@ -175,15 +192,15 @@ LIMIT 25
 Follow the money two hops out: who does my counterparty pay? The query returns each chain
 as a path, so the Workspace draws both transfers along with the three accounts.
 `WHERE c <> a` drops chains that come straight back to the anchor. For the demo anchor that removes 102 of
-10,500 chains. The query keeps the first 25 by account id, with `link_id` breaking ties
+10,500 chains. The query keeps the first 25 by account id, with `linkId` breaking ties
 between repeat transfers. The chain shape is the point. About a second.
 
 ```cypher
-MATCH p=(a:Account {account_id: $account_id})-[t1:TRANSFERRED_TO]->(b:Account)
+MATCH p=(a:Account {accountId: $accountId})-[t1:TRANSFERRED_TO]->(b:Account)
         -[t2:TRANSFERRED_TO]->(c:Account)
 WHERE c <> a
 RETURN p
-ORDER BY b.account_id, c.account_id, t1.link_id, t2.link_id
+ORDER BY b.accountId, c.accountId, t1.linkId, t2.linkId
 LIMIT 25
 ```
 
@@ -212,7 +229,7 @@ the SQL, so exactly 25 rows come back. The sort on ids makes them the same 25 on
 ```cypher
 MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
 RETURN a, t, m
-ORDER BY a.account_id, m.merchant_id, t.txn_id
+ORDER BY a.accountId, m.merchantId, t.txnId
 LIMIT 25
 ```
 
@@ -221,12 +238,12 @@ LIMIT 25
 An unanchored two-hop over `TRANSFERRED_TO`. Each row is a path, so the Workspace draws
 both transfers with the three accounts. The limit still pushes down to 25 rows. The pushed
 SQL also carries Cypher's relationship-uniqueness rule. The sort on account ids and
-`link_id` makes the 25 paths the same on every run.
+`linkId` makes the 25 paths the same on every run.
 
 ```cypher
 MATCH p=(a:Account)-[t1:TRANSFERRED_TO]->(b:Account)-[t2:TRANSFERRED_TO]->(c:Account)
 RETURN p
-ORDER BY a.account_id, b.account_id, c.account_id, t1.link_id, t2.link_id
+ORDER BY a.accountId, b.accountId, c.accountId, t1.linkId, t2.linkId
 LIMIT 25
 ```
 
@@ -239,13 +256,95 @@ still grows with each hop. An anchor is what makes a deep traversal cheap.
 This query has no `ORDER BY`, so it returns an arbitrary 25 paths. A sort and a `LIMIT`
 both push into the SQL. The sort makes the warehouse build every four-hop chain before it
 can keep the first 25. Without the sort, the warehouse can stop once it has 25 chains. With
-`ORDER BY a.account_id` added, the query ran past a 90s timeout.
+`ORDER BY a.accountId` added, the query ran past a 90s timeout.
 
 ```cypher
 MATCH p=(a:Account)-[:TRANSFERRED_TO]->(b:Account)-[:TRANSFERRED_TO]->(c:Account)
       -[:TRANSFERRED_TO]->(d:Account)-[:TRANSFERRED_TO]->(e:Account)
 RETURN p
 LIMIT 25
+```
+
+## More queries for the console
+
+The `basic` demo does not run these. They are aggregations over the whole graph, so each
+one scans a full relationship or node table. Run them in the Aura console.
+
+### Account balance tiers
+
+To group accounts into balance tiers and summarize each tier:
+
+```cypher
+MATCH (a:Account)
+WITH a,
+     CASE WHEN a.balance < 10000 THEN 'low'
+          WHEN a.balance < 100000 THEN 'mid'
+          ELSE 'high' END AS balanceTier
+RETURN balanceTier,
+       count(a) AS accounts,
+       round(avg(a.balance), 2) AS avgBalance,
+       min(a.holderAge) AS minAge,
+       max(a.holderAge) AS maxAge
+ORDER BY accounts DESC
+```
+
+Add `EXPLAIN` to the front to see its SQL translation.
+
+### Top merchants by spend
+
+To find which merchants pull the most money, and from how many distinct accounts:
+
+```cypher
+MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
+RETURN m.merchantName AS merchant,
+       m.category       AS category,
+       count(t)         AS txns,
+       count(DISTINCT a) AS customers,
+       round(sum(t.amount), 2) AS totalSpend
+ORDER BY totalSpend DESC
+LIMIT 20
+```
+
+### Spend by merchant category
+
+To roll spend up to the category level, the merchant analogue of the balance-tier query:
+
+```cypher
+MATCH (:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
+RETURN m.category AS category,
+       count(t)   AS txns,
+       round(sum(t.amount), 2) AS totalSpend,
+       round(avg(t.amount), 2) AS avgTxn
+ORDER BY totalSpend DESC
+```
+
+### Off-hours activity per merchant
+
+To surface merchants with unusual late-night volume, filter on `txnHour < 6`. That window covers midnight to 5 AM.
+
+```cypher
+MATCH (:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
+WHERE t.txnHour < 6
+RETURN m.merchantName AS merchant,
+       count(t)        AS offhoursTxns,
+       round(sum(t.amount), 2) AS offhoursSpend
+ORDER BY offhoursTxns DESC
+LIMIT 20
+```
+
+### Accounts sharing a merchant
+
+To find two accounts that both pay the same merchant, use this unanchored, aggregated form of [query 10](#10-two-hop-accounts-linked-through-a-shared-merchant):
+
+```cypher
+MATCH (a:Account)-[:TRANSACTED_WITH]->(m:Merchant)<-[:TRANSACTED_WITH]-(b:Account)
+WHERE a.accountId < b.accountId
+RETURN m.merchantName AS merchant,
+       a.accountId AS accountA,
+       b.accountId AS accountB,
+       count(*)     AS sharedTxns
+ORDER BY sharedTxns DESC
+LIMIT 20
 ```
 
 ## Why anchoring matters

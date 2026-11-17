@@ -6,10 +6,19 @@ warehouse, so the rules here are about helping that translation push work down t
 Databricks instead of dragging rows back to the graph engine.
 
 The working fraud queries this guide draws on are the demo set in
-[`finding-fraud.md`](docs/finding-fraud.md). The warm-up and visualization queries are in
+[`finding-fraud.md`](finding-fraud.md). The warm-up and visualization queries are in
 [`basic-graph-examples.md`](basic-graph-examples.md). This document is the reference
 for *why* those queries are shaped the way they are, and what to do when a standard
 Cypher query will not run.
+
+> **Which data source this covers:** This guide was measured on Databricks. The Cypher
+> coverage lists and the query shapes come from the Virtual Graph engine, so they are a
+> good starting point on S3 Tables. They have not been re-measured there. Error
+> messages that come from the SQL engine, such as `AMBIGUOUS_REFERENCE`, may differ on
+> DuckDB. The timings, warehouse sizing, result cache, query history and
+> connection-pool notes are Databricks-specific. On an S3 table bucket, the SQL runs in
+> a DuckDB engine embedded in the Virtual Graph instance, so those numbers do not carry
+> over. See [`setup-aws.md`](setup-aws.md) for that setup.
 
 ## How the Virtual Graph works
 
@@ -31,10 +40,10 @@ Cypher query will not run.
 - **Labels.** Node labels follow the Neo4j convention of singular PascalCase: `:Account`
   and `:Merchant`. The backing tables keep their SQL names, `accounts` and `merchants`.
   **Generate from schema** names labels after the tables, so rename them in the Aura model
-  as described in section 5 of [`virtual-graph.md`](virtual-graph.md). Every query in this
+  as described in section 3 of [`vg-model.md`](vg-model.md#3-define-your-schema). Every query in this
   project uses `:Account` and `:Merchant`.
-  - `TRANSFERRED_TO` (`:Account` → `:Account`): `amount`, `transfer_timestamp`, `link_id`.
-  - `TRANSACTED_WITH` (`:Account` → `:Merchant`): `amount`, `txn_timestamp`, `txn_hour`, `txn_id`.
+  - `TRANSFERRED_TO` (`:Account` → `:Account`): `amount`, `transferTimestamp`, `linkId`.
+  - `TRANSACTED_WITH` (`:Account` → `:Merchant`): `amount`, `txnTimestamp`, `txnHour`, `txnId`.
 
 Query shape is the first thing to get right. The timings in this guide were measured on
 2026-09-23. The absolute seconds for any given query also depend on the warehouse size and
@@ -44,7 +53,7 @@ the connection pool. Treat the numbers here as rough and directional.
 
 A few terms used throughout:
 
-- **Scalar:** A scalar is a single plain value, such as an `account_id`. A whole node
+- **Scalar:** A scalar is a single plain value, such as an `accountId`. A whole node
   object is the opposite.
 - **Pushdown:** Pushdown means the aggregation runs on Databricks as a SQL `GROUP BY`. The
   warehouse then returns one row per group.
@@ -81,50 +90,50 @@ that measured it. The rules come from the SQL text of each statement in
 
 ### Pattern 1: group by scalar keys
 
-Every group key must be a scalar property such as `a.account_id`. A node such as `a`, a
-relationship such as `t`, or a function such as `date(t.txn_timestamp)` used as a group
+Every group key must be a scalar property such as `a.accountId`. A node such as `a`, a
+relationship such as `t`, or a function such as `date(t.txnTimestamp)` used as a group
 key keeps the `GROUP BY` out of the SQL. The warehouse then returns every matching row,
 and the engine groups them.
 
 The cost of that mistake grows with the number of matches. The structuring query matches
 only 200 transfers. Its node-grouped form, `WITH src, count(t) ...`, returns the same rows
 as the scalar form in about 0.5s, against about 0.35s. Query 10 matches 11,151,853
-transfer pairs. Grouped by the `mule` node, it took 208s. Grouped by `mule.account_id`, it
+transfer pairs. Grouped by the `mule` node, it took 208s. Grouped by `mule.accountId`, it
 pushes 24,319 groups and takes about 1s.
 
-- **Structuring (just-under-threshold transfers).** Grouping by scalar `src.account_id`
+- **Structuring (just-under-threshold transfers).** Grouping by scalar `src.accountId`
   pushes the `GROUP BY` down to the warehouse.
 
   ```cypher
   MATCH (src:Account)-[t:TRANSFERRED_TO]->(:Account)
   WHERE t.amount >= 9000 AND t.amount < 10000
-  WITH src.account_id AS account_id, count(t) AS near_threshold, round(sum(t.amount), 2) AS total
-  RETURN account_id, near_threshold, total
-  ORDER BY near_threshold DESC, account_id ASC
+  WITH src.accountId AS accountId, count(t) AS nearThreshold, round(sum(t.amount), 2) AS total
+  RETURN accountId, nearThreshold, total
+  ORDER BY nearThreshold DESC, accountId ASC
   ```
 
-- **New account, high velocity.** The scalar form groups by `a.account_id` and carries
-  `a.opened_date` and `a.holder_age` as extra grouping keys. Those values are constant per
+- **New account, high velocity.** The scalar form groups by `a.accountId` and carries
+  `a.openedDate` and `a.holderAge` as extra grouping keys. Those values are constant per
   account, so they do not split any group.
 
   ```cypher
   MATCH (a:Account)-[t:TRANSFERRED_TO]->(:Account)
-  WHERE a.opened_date >= date("2022-11-06")
-  WITH a.account_id AS account_id, a.opened_date AS opened_date,
-       a.holder_age AS holder_age, count(t) AS transfers, sum(t.amount) AS outflow
-  RETURN account_id, opened_date, holder_age, transfers, outflow
+  WHERE a.openedDate >= date("2022-11-06")
+  WITH a.accountId AS accountId, a.openedDate AS openedDate,
+       a.holderAge AS holderAge, count(t) AS transfers, sum(t.amount) AS outflow
+  RETURN accountId, openedDate, holderAge, transfers, outflow
   ```
 
 Carry any constant node property you need, such as the balance or the opened date, as an
 additional scalar grouping key. Do not group by the node just to keep that property.
 
-To group per relationship, group on its unique id. Query 8 groups on `t_in.link_id` and
-carries `t_in.amount` as an extra key, instead of grouping on `t_in`. That change took it
+To group per relationship, group on its unique id. Query 8 groups on `tIn.linkId` and
+carries `tIn.amount` as an extra key, instead of grouping on `tIn`. That change took it
 from 210,289 raw rows to 98,474 groups, and from about 3.6s to about 1s.
 
-Query 9 is the one exception in the demo. It groups on `date(t.txn_timestamp)`, which does
+Query 9 is the one exception in the demo. It groups on `date(t.txnTimestamp)`, which does
 not push down, so it ships all 250,000 purchases and runs in 5 to 9s. An epoch-day key,
-`toInteger(t.txn_timestamp) / 86400`, does push down. It returns 208,127 groups, but it
+`toInteger(t.txnTimestamp) / 86400`, does push down. It returns 208,127 groups, but it
 takes about 35s. The engine ingests the arrays from `collect(DISTINCT ...)` slowly, so a
 pushed `collect` over many groups can cost more than the raw rows. Time both forms when a
 query collects.
@@ -137,7 +146,7 @@ let the server return one row per account.
 
 `count(DISTINCT r)` over a relationship variable runs, but it keeps the `GROUP BY` out of
 the SQL. Count the relationship's unique id instead. Query 3 counts
-`count(DISTINCT f.link_id)` rather than `count(DISTINCT f)`. `link_id` is unique, so the
+`count(DISTINCT f.linkId)` rather than `count(DISTINCT f)`. `linkId` is unique, so the
 counts are equal. The change took query 3 from 56,254 raw rows to 21,052 groups, and from
 about 2.2s to about 0.6s warm.
 
@@ -145,29 +154,30 @@ about 2.2s to about 0.6s warm.
 
   ```cypher
   MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-  WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
-  WITH dst.account_id AS recipient, count(DISTINCT src.account_id) AS senders,
+  WHERE t.transferTimestamp >= datetime("2024-03-23T23:58:00Z")
+  WITH dst.accountId AS recipient, count(DISTINCT src.accountId) AS senders,
        count(t) AS transfers, sum(t.amount) AS inflow
   RETURN recipient, senders, transfers, inflow
   ```
 
-- **Fan-out by distinct recipients** is the mirror. Group by `src.account_id` and count
-  distinct `dst.account_id`.
+- **Fan-out by distinct recipients** is the mirror. Group by `src.accountId` and count
+  distinct `dst.accountId`.
 
 The same `count(DISTINCT ...)` form gives hub statistics. In-degree is
-`count(DISTINCT src.account_id)` grouped by the recipient. Out-degree is
-`count(DISTINCT dst.account_id)` grouped by the sender. The incoming transfer count is
+`count(DISTINCT src.accountId)` grouped by the recipient. Out-degree is
+`count(DISTINCT dst.accountId)` grouped by the sender. The incoming transfer count is
 `count(t)` in the same `WITH` as the in-degree.
 
 **Aliasing rule.** An aggregation over two `Account` variables must alias its key as
-`recipient`, `sender`, or `mule_id` in the `WITH`, never `account_id`. A `WITH` alias that
-repeats the backing column name fails with `AMBIGUOUS_REFERENCE`. For example,
-`WITH dst.account_id AS account_id` fails in a query that also binds `src`. Rename the key
-in `RETURN` with `RETURN recipient AS account_id` if you need the familiar column name. The
-pass-through mule query aliases its key as `mule_id` for the same reason. The
-`TRANSACTED_WITH` backing table also exposes its own
-`account_id` column. On the merchant side, alias the group key to another name and rename
-it in `RETURN`.
+`recipient`, `sender`, or `muleId` in the `WITH`. Never alias it to a backing column
+name. The original snake_case alias `account_id` repeated a backing column name. In a
+query that also binds `src`, `WITH dst.account_id AS account_id` failed with
+`AMBIGUOUS_REFERENCE`. The camelCase alias `accountId` has not been tested. Keep the
+distinct alias until it is. Rename the key in `RETURN` with `RETURN recipient AS
+accountId` if you need the familiar column name. The pass-through mule query aliases
+its key as `muleId` for the same reason. The `TRANSACTED_WITH` backing table also
+exposes its own `account_id` column. On the merchant side, alias the group key to
+another name and rename it in `RETURN`.
 
 ### Pattern 3: put thresholds in a second `WITH`
 
@@ -185,19 +195,19 @@ the same rows.
 
   ```cypher
   MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-  WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
-  WITH dst.account_id AS recipient, count(t) AS transfers, sum(t.amount) AS inflow
+  WHERE t.transferTimestamp >= datetime("2024-03-23T23:58:00Z")
+  WITH dst.accountId AS recipient, count(t) AS transfers, sum(t.amount) AS inflow
   WITH recipient, transfers, inflow
   WHERE transfers >= 5
-  RETURN recipient AS account_id, transfers, inflow
-  ORDER BY transfers DESC, account_id
+  RETURN recipient AS accountId, transfers, inflow
+  ORDER BY transfers DESC, accountId
   LIMIT 50
   ```
 
   The two forms return the same accounts in the same order. The unrounded `inflow` sums
   differ in the twelfth decimal place, because the summation order changes.
 
-- **Courier transfer degree.** Query 7's transfer half moved its `transfer_count >= 100`
+- **Courier transfer degree.** Query 7's transfer half moved its `transferCount >= 100`
   threshold into a second `WITH`. It went from 600,000 raw rows at about 11s to 25,000
   groups at under 1s, with the same 1,200 rows.
 
@@ -209,7 +219,7 @@ The threshold itself never reaches the SQL. The warehouse returns every group, a
 graph engine applies the `WHERE`. `ORDER BY` and `LIMIT` after an aggregating `WITH` do
 not reach the warehouse either. The captured SQL is byte-identical with or without them. The engine
 sorts and trims the groups afterward as a post-processing step. Add a secondary sort key
-such as `account_id` so rows that tie at the `LIMIT` cutoff come back in a fixed order.
+such as `accountId` so rows that tie at the `LIMIT` cutoff come back in a fixed order.
 Every demo fraud query does this. At tens of thousands of grouped rows that step is cheap.
 The engine trims before the engine-to-client leg, so a top-N sends fewer rows over the
 wire. Only a filter or an anchor reduces warehouse work. A `LIMIT` on an aggregation does
@@ -243,23 +253,23 @@ removes the `DISTINCT`.
 
   ```cypher
   MATCH (a:Account)-[tr:TRANSFERRED_TO]-(:Account)
-  WITH a.account_id AS account_id, count(tr) AS transfer_count
-  WITH account_id, transfer_count
-  WHERE transfer_count >= 100
-  RETURN account_id, transfer_count
+  WITH a.accountId AS accountId, count(tr) AS transferCount
+  WITH accountId, transferCount
+  WHERE transferCount >= 100
+  RETURN accountId, transferCount
   ```
 
   ```cypher
   MATCH (a:Account)-[tw:TRANSACTED_WITH]->(:Merchant)
-  WITH a.account_id AS acct, count(tw) AS merchant_count
-  RETURN acct AS account_id, merchant_count
+  WITH a.accountId AS acct, count(tw) AS merchantCount
+  RETURN acct AS accountId, merchantCount
   ```
 
   Each half pushes down. The transfer half keeps its threshold in a second `WITH`, per
   [Pattern 3](#pattern-3-put-thresholds-in-a-second-with). The courier query takes about
   4s in the demo. Most of that is reading the 24,999 rows of the merchant half.
-  Client-side, left-join the two halves on the account. Default `merchant_count` to 0 for
-  accounts with no merchant activity, then apply the `merchant_count < 20` check. That
+  Client-side, left-join the two halves on the account. Default `merchantCount` to 0 for
+  accounts with no merchant activity, then apply the `merchantCount < 20` check. That
   check is the only part that runs client-side. It has to follow the join, because
   accounts with zero merchant activity appear only after the default fills in. The
   transfer half also confirms the undirected `-[tr:TRANSFERRED_TO]-` pattern translates
@@ -272,11 +282,11 @@ unanchored single-, two-, and four-hop traversal with `LIMIT 25` each produced e
 rows on the warehouse. A limit-bounded visualization query does not need an anchor to be
 bounded. The `LIMIT` bounds the output, not the join work. The unanchored four-hop query
 returned in 0.6 to 2.4s across runs on this data, but its join work still grows with
-each hop. An anchor on a single node id such as `{account_id: 184}` becomes a selective SQL filter. That filter, not
+each hop. An anchor on a single node id such as `{accountId: 184}` becomes a selective SQL filter. That filter, not
 the `LIMIT`, is what keeps a deep traversal cheap.
 
 ```cypher
-MATCH (a:Account {account_id: $account_id})-[t:TRANSACTED_WITH]->(m:Merchant)
+MATCH (a:Account {accountId: $accountId})-[t:TRANSACTED_WITH]->(m:Merchant)
 RETURN a, t, m
 LIMIT 25
 ```
@@ -284,7 +294,7 @@ LIMIT 25
 For a shallow visualization, a `LIMIT` alone is enough. For a deep one, anchor on a
 specific account or merchant. Either way, keep the row count small, because every row
 travels back over the wire. The visualization queries in
-[`finding-fraud.md`](docs/finding-fraud.md) and [`basic-graph-examples.md`](basic-graph-examples.md)
+[`finding-fraud.md`](finding-fraud.md) and [`basic-graph-examples.md`](basic-graph-examples.md)
 all follow this rule.
 
 An `ORDER BY` changes the cost of an unanchored deep traversal. The sort pushes into the
@@ -322,9 +332,9 @@ Bound or anchor the pattern when the result itself is large.
 
 A two-hop pattern also matches once per combination of edges. The round-trip query binds
 one row for every pair of one transfer each way, so `count(*)` and `sum()` over it count
-each transfer several times. Count each direction with `count(DISTINCT f.link_id)` and
+each transfer several times. Count each direction with `count(DISTINCT f.linkId)` and
 divide each direction's sum by the other direction's count, as query 3 does. The
-pass-through mule query groups by mule and incoming `link_id` in a first `WITH`, so each
+pass-through mule query groups by mule and incoming `linkId` in a first `WITH`, so each
 incoming transfer's dollars count once.
 
 ### When plain Cypher is not enough: GDS
@@ -352,21 +362,21 @@ follow from the patterns above.
   inside `WHERE` is unsupported. Compute the cutoff in the application and pass it as
   `$since`, then use `prop >= $since`. Anchor the window to the dataset's maximum
   timestamp, not `now()`: the synthetic transfer data ends 2024-03-30, so a window
-  relative to the present returns nothing. `max(transfer_timestamp)` is fast to query and
+  relative to the present returns nothing. `max(transferTimestamp)` is fast to query and
   makes a good anchor. The demo cutoff `2024-03-23T23:58:00Z` is that maximum minus 7
-  days. The `opened_date` series ends 2022-12-06, so the new-account window uses
+  days. The `openedDate` series ends 2022-12-06, so the new-account window uses
   `2022-11-06`, that maximum minus 30 days.
 - **Write a multi-hop time window with `toInteger()`.** Timestamp-plus-duration
   comparisons across relationships are unsupported in `WHERE`, and so are
   `duration.inSeconds()` and `duration.between()`. `toInteger()` on a timestamp returns
   epoch seconds and works in `WHERE`, so a 24-hour upper bound is
-  `toInteger(t_out.transfer_timestamp) - toInteger(t_in.transfer_timestamp) < 86400`. Keep
-  the plain ordering `t_out.transfer_timestamp >= t_in.transfer_timestamp` alongside it. On
+  `toInteger(tOut.transferTimestamp) - toInteger(tIn.transferTimestamp) < 86400`. Keep
+  the plain ordering `tOut.transferTimestamp >= tIn.transferTimestamp` alongside it. On
   account 7855 this filter returns 148 of 6,458 ordered transfer pairs, which matches the gap
   computed client-side.
 - **Compute time gaps with `toInteger()`.** `toInteger()` on a timestamp pushes down to
-  SQL as a cast to epoch seconds. `avg(toInteger(t_out.transfer_timestamp) -
-  toInteger(t_in.transfer_timestamp))` therefore pushes down with its `GROUP BY`.
+  SQL as a cast to epoch seconds. `avg(toInteger(tOut.transferTimestamp) -
+  toInteger(tIn.transferTimestamp))` therefore pushes down with its `GROUP BY`.
   `avg(duration.inSeconds(...))` runs, but it keeps the `GROUP BY` out of the SQL. Reading
   `.epochMillis` off a timestamp property raises the `01N52` unknown-property warning.
   Query 10 uses the `toInteger()` form and converts the seconds to hours client-side. The
@@ -374,8 +384,8 @@ follow from the patterns above.
   the averages match `duration.inSeconds` to within 4e-8 seconds.
 - **Project timestamps into GDS with `toInteger()` in a `WITH`.** A GDS projection needs a
   numeric timestamp. Bind it first with
-  `WITH src, dst, t, toInteger(t.transfer_timestamp) * 1000 AS transfer_timestamp_ms`,
-  then pass `transfer_timestamp_ms` in `relationshipProperties`. The Virtual Graph pushes
+  `WITH src, dst, t, toInteger(t.transferTimestamp) * 1000 AS transferTimestampMs`,
+  then pass `transferTimestampMs` in `relationshipProperties`. The Virtual Graph pushes
   `toInteger()` on a timestamp down to SQL as epoch seconds and raises no warning. Every
   transfer timestamp is a whole second, so the values equal `epochMillis` exactly. The
   same call inside the projection's config map fails with `22N38`. Stock Cypher rejects
@@ -413,11 +423,11 @@ subject to change, so recheck that page and retest when a query fails.
 | Property plus aggregate on the same node | `MATCH (a:Account) RETURN a.region, count(a) AS c ORDER BY c DESC LIMIT 10` runs and returns the six regions. The official page says this form fails. |
 | `UNION` / `UNION ALL` | Each branch runs as its own pushed warehouse statement and the engine concatenates the results. Verified with a two-label count and used by the cycles recipe. |
 | Plain comparisons in `WHERE` | Numeric comparisons, `abs()`, arithmetic on amounts, `timestamp >= timestamp`, `timestamp >= $param`, `timestamp >= datetime("2020-01-01T00:00:00Z")`. |
-| `toInteger()` on a timestamp | It returns epoch seconds, in `RETURN`, in a `WITH`, and in `WHERE`. `toInteger(o.transfer_timestamp) - toInteger(i.transfer_timestamp) < 86400` filters to a 24-hour gap. Stock Cypher rejects `toInteger()` on a temporal value, so this form works only on the Virtual Graph. |
+| `toInteger()` on a timestamp | It returns epoch seconds, in `RETURN`, in a `WITH`, and in `WHERE`. `toInteger(o.transferTimestamp) - toInteger(i.transferTimestamp) < 86400` filters to a 24-hour gap. Stock Cypher rejects `toInteger()` on a temporal value, so this form works only on the Virtual Graph. |
 | Temporal projection in `RETURN` | `date(timestamp)`, `duration.inSeconds(...)` and `duration.between(...)`. The `.epochMillis` property also runs, but it raises the `01N52` warning. `duration.inSeconds` inside an aggregate, or `date()` as a group key, keeps the `GROUP BY` out of the SQL. See [Adaptation recipes](#adaptation-recipes). |
-| Open quantified path patterns | An anchored `(a:Account {account_id: 7855})-[:TRANSFERRED_TO]->{1,2}(b:Account)` runs. It must be the only `MATCH` in the query, and no hop may follow the quantified part. The warehouse runs it as a recursive query, so deeper bounds grow fast: `{1,3}` from the same anchor fails after 17s with the Databricks `RECURSION_ROW_LIMIT_EXCEEDED` error at 1,000,000 rows. |
-| `MATCH` followed by `UNWIND` | `MATCH (a:Account {account_id: 7855}) UNWIND [1, 2] AS x RETURN a.account_id, x` runs. A bare `UNWIND [1, 2, 3] AS x RETURN x` also runs. |
-| Correlated `CALL` subquery | `MATCH (a:Account {account_id: 7855}) CALL (a) { MATCH (a)-[t:TRANSFERRED_TO]->(b:Account) RETURN count(t) AS c } RETURN c` runs and returns 119. The official page lists `CALL` as unsupported. |
+| Open quantified path patterns | An anchored `(a:Account {accountId: 7855})-[:TRANSFERRED_TO]->{1,2}(b:Account)` runs. It must be the only `MATCH` in the query, and no hop may follow the quantified part. The warehouse runs it as a recursive query, so deeper bounds grow fast: `{1,3}` from the same anchor fails after 17s with the Databricks `RECURSION_ROW_LIMIT_EXCEEDED` error at 1,000,000 rows. |
+| `MATCH` followed by `UNWIND` | `MATCH (a:Account {accountId: 7855}) UNWIND [1, 2] AS x RETURN a.accountId, x` runs. A bare `UNWIND [1, 2, 3] AS x RETURN x` also runs. |
+| Correlated `CALL` subquery | `MATCH (a:Account {accountId: 7855}) CALL (a) { MATCH (a)-[t:TRANSFERRED_TO]->(b:Account) RETURN count(t) AS c } RETURN c` runs and returns 119. The official page lists `CALL` as unsupported. |
 | APOC functions in `RETURN` | `RETURN apoc.version()` and `apoc.text.capitalize(a.region)` in `RETURN` run. The official page lists APOC as unsupported. APOC in `WHERE` fails with `42NG0`. |
 | Schema and system procedures | `CALL db.labels()`, `CALL dbms.components()` and `SHOW PROCEDURES` run. |
 
@@ -434,7 +444,7 @@ Most rejections return `42NG1` with a specific reason.
 | `MATCH` after `WITH` | `MATCH (a:Account) WITH count(a) ... MATCH (m:Merchant) ...` fails at parse time with `42NG1: Aggregating WITH clause is not supported`. A plain `WITH a` followed by `MATCH` fails with `42NG0`. The official page states the rule: a `MATCH` after a `WITH` is unsupported. `WITH` is a projection boundary: it ends one query part and begins another, carrying forward only the variables it names. The Virtual Graph cannot translate a second `MATCH` opened after that horizon. `count()` itself is supported on each side. Workaround: combine two single-label counts with `UNION ALL` in one statement. Each branch has its own independent scope and runs as its own pushed warehouse query. |
 | `CYPHER 25` version prefix | Runs, but does not enable any of the above. |
 | Subquery expressions and leading `CALL` | `EXISTS { MATCH ... }` and `COUNT { ... }` fail with `42NG0`. `CALL () { ... }` at the start of a query returns `42NG1: The query must start with at least one MATCH clause`. The GDS path in [`gds-guide.md`](gds-guide.md) and the correlated `CALL` above run. |
-| `UNWIND` followed by `MATCH` | `UNWIND [7855, 1032] AS id MATCH (a:Account {account_id: id}) ...` fails with `42NG0`. This matches the official page. |
+| `UNWIND` followed by `MATCH` | `UNWIND [7855, 1032] AS id MATCH (a:Account {accountId: id}) ...` fails with `42NG0`. This matches the official page. |
 | Vector search | `db.index.vector.queryNodes` fails with `The attempted kind of operations are not supported on virtual graph databases`. |
 | Fulltext search | The official page lists it as unsupported. This graph has no fulltext index, so the test query failed with `There is no such fulltext schema index` and the procedure itself was not exercised. |
 
@@ -500,13 +510,14 @@ one names the form to use instead.
 - **P2P-heavy, merchant-light with an `OPTIONAL MATCH` cross product.** This form fails with
   `42NG1`. Split it into two halves per
   [Pattern 4](#pattern-4-split-cross-products-into-independent-halves).
-- **A group key aliased to a backing column name.** `mule.account_id AS account_id` fails
-  with `AMBIGUOUS_REFERENCE`. Use a distinct alias such as `mule_id`, per the aliasing rule
-  in [Pattern 2](#pattern-2-count-distinct-values-on-the-server).
+- **A group key aliased to a backing column name.** The old snake_case alias
+  `account_id` repeated a backing column name and failed with `AMBIGUOUS_REFERENCE`.
+  Use a distinct alias such as `muleId`, per the aliasing rule in
+  [Pattern 2](#pattern-2-count-distinct-values-on-the-server).
 - **A node or relationship as a group key.** `WITH mule, count(*) ...` or
-  `WITH mule_id, t_in, ...` keeps the `GROUP BY` out of the SQL, so every match crosses
+  `WITH muleId, tIn, ...` keeps the `GROUP BY` out of the SQL, so every match crosses
   into the graph engine. Query 10 in that form took 208s. Group on scalar properties such
-  as `mule.account_id` and `t_in.link_id`, per
+  as `mule.accountId` and `tIn.linkId`, per
   [Pattern 1](#pattern-1-group-by-scalar-keys).
 - **A threshold on the aggregating `WITH`.** `WITH k, count(t) AS c WHERE c >= 100` keeps
   the `GROUP BY` out of the SQL. Query 7's transfer half took about 11s in that form. Move
@@ -514,7 +525,7 @@ one names the form to use instead.
   [Pattern 3](#pattern-3-put-thresholds-in-a-second-with).
 - **`count(DISTINCT r)` on a relationship, or `duration.inSeconds` inside an aggregate.**
   Both run, and both keep the `GROUP BY` out of the SQL. Count the relationship's
-  `link_id`, per [Pattern 2](#pattern-2-count-distinct-values-on-the-server). Compute gaps
+  `linkId`, per [Pattern 2](#pattern-2-count-distinct-values-on-the-server). Compute gaps
   with `toInteger()`, per [Adaptation recipes](#adaptation-recipes).
 - **`ORDER BY` with `LIMIT` on an unanchored traversal of three or more hops.** The
   warehouse builds the full join before it can pick the top rows. A sorted three-hop query
@@ -541,13 +552,13 @@ These forms use the same `:Account` / `:Merchant` labels as the Virtual Graph mo
 
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= datetime() - duration({days: 7})
+WHERE t.transferTimestamp >= datetime() - duration({days: 7})
 WITH dst,
      count(DISTINCT src) AS senders,
      count(t)            AS transfers,
      sum(t.amount)       AS inflow
 WHERE senders >= 5
-RETURN dst.account_id, senders, transfers, round(inflow, 2) AS inflow
+RETURN dst.accountId, senders, transfers, round(inflow, 2) AS inflow
 ORDER BY senders DESC, inflow DESC
 LIMIT 50
 ```
@@ -560,7 +571,7 @@ WITH src,
      count(DISTINCT dst) AS recipients,
      sum(t.amount)       AS outflow
 WHERE recipients >= 5
-RETURN src.account_id, recipients, round(outflow, 2) AS outflow
+RETURN src.accountId, recipients, round(outflow, 2) AS outflow
 ORDER BY recipients DESC
 LIMIT 50
 ```
@@ -568,19 +579,19 @@ LIMIT 50
 ### 3. Pass-through mule (local betweenness proxy): ✓
 
 ```cypher
-MATCH (a:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)-[t_out:TRANSFERRED_TO]->(b:Account)
-WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
-  AND t_out.transfer_timestamp <= t_in.transfer_timestamp + duration({hours: 48})
-  AND abs(t_out.amount - t_in.amount) <= 0.05 * t_in.amount
+MATCH (a:Account)-[tIn:TRANSFERRED_TO]->(mule:Account)-[tOut:TRANSFERRED_TO]->(b:Account)
+WHERE tOut.transferTimestamp >= tIn.transferTimestamp
+  AND tOut.transferTimestamp <= tIn.transferTimestamp + duration({hours: 48})
+  AND abs(tOut.amount - tIn.amount) <= 0.05 * tIn.amount
   AND a <> b
-RETURN mule.account_id,
+RETURN mule.accountId,
        count(*)                 AS passthroughs,
-       round(sum(t_in.amount), 2) AS volume
+       round(sum(tIn.amount), 2) AS volume
 ORDER BY passthroughs DESC
 LIMIT 50
 ```
 
-This textbook form sums `t_in.amount` once per matching outgoing transfer, so `volume`
+This textbook form sums `tIn.amount` once per matching outgoing transfer, so `volume`
 counts an incoming transfer several times. The Virtual Graph form in the fraud demo groups
 by mule and incoming transfer first, so each incoming transfer counts once.
 
@@ -588,16 +599,16 @@ by mule and incoming transfer first, so each incoming transfer counts once.
 
 ```cypher
 MATCH (a:Account)-[f:TRANSFERRED_TO]->(b:Account)-[g:TRANSFERRED_TO]->(a)
-WHERE a.account_id < b.account_id
-RETURN a.account_id, b.account_id,
-       round(sum(f.amount + g.amount), 2) AS round_trip_volume,
-       count(*)                            AS leg_count
-ORDER BY round_trip_volume DESC
+WHERE a.accountId < b.accountId
+RETURN a.accountId, b.accountId,
+       round(sum(f.amount + g.amount), 2) AS roundTripVolume,
+       count(*)                            AS legCount
+ORDER BY roundTripVolume DESC
 LIMIT 50
 ```
 
-This textbook form binds one row per combination of one transfer each way. `leg_count`
-is therefore the product of the two direction counts, and `round_trip_volume` counts each
+This textbook form binds one row per combination of one transfer each way. `legCount`
+is therefore the product of the two direction counts, and `roundTripVolume` counts each
 transfer several times. Query 3 in the fraud demo counts each direction with
 `count(DISTINCT ...)` and divides each direction's sum by the other direction's count.
 
@@ -609,9 +620,9 @@ confirmed-working construct on the Virtual Graph.
 
 ```cypher
 MATCH path = (a:Account)-[:TRANSFERRED_TO]->{2,4}(a)
-RETURN a.account_id AS ring_origin,
+RETURN a.accountId AS ringOrigin,
        length(path) AS hops,
-       [n IN nodes(path) | n.account_id] AS cycle
+       [n IN nodes(path) | n.accountId] AS cycle
 LIMIT 50
 ```
 
@@ -619,14 +630,14 @@ LIMIT 50
 
 ```cypher
 MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
-WITH m, date(t.txn_timestamp) AS day,
-     collect(DISTINCT a.account_id) AS accounts,
+WITH m, date(t.txnTimestamp) AS day,
+     collect(DISTINCT a.accountId) AS accounts,
      count(t)                       AS txns
 WHERE size(accounts) >= 4
   AND txns <= 200
-RETURN m.merchant_id, m.merchant_name, day,
-       size(accounts) AS account_count, txns, accounts
-ORDER BY account_count DESC
+RETURN m.merchantId, m.merchantName, day,
+       size(accounts) AS accountCount, txns, accounts
+ORDER BY accountCount DESC
 LIMIT 50
 ```
 
@@ -635,10 +646,10 @@ LIMIT 50
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(:Account)
 WHERE t.amount >= 9000 AND t.amount < 10000
-WITH src, count(t) AS near_threshold, round(sum(t.amount), 2) AS total
-WHERE near_threshold >= 3
-RETURN src.account_id, near_threshold, total
-ORDER BY near_threshold DESC
+WITH src, count(t) AS nearThreshold, round(sum(t.amount), 2) AS total
+WHERE nearThreshold >= 3
+RETURN src.accountId, nearThreshold, total
+ORDER BY nearThreshold DESC
 LIMIT 50
 ```
 
@@ -646,10 +657,10 @@ LIMIT 50
 
 ```cypher
 MATCH (a:Account)-[t:TRANSFERRED_TO]->(:Account)
-WHERE a.opened_date >= date() - duration({days: 30})
+WHERE a.openedDate >= date() - duration({days: 30})
 WITH a, count(t) AS transfers, round(sum(t.amount), 2) AS outflow
 WHERE transfers >= 10
-RETURN a.account_id, a.opened_date, a.holder_age, transfers, outflow
+RETURN a.accountId, a.openedDate, a.holderAge, transfers, outflow
 ORDER BY outflow DESC
 LIMIT 50
 ```
@@ -657,33 +668,33 @@ LIMIT 50
 ### 9. Hub network statistics: ✓ (reshaped)
 
 ```cypher
-MATCH (a:Account)<-[r_in:TRANSFERRED_TO]-(src:Account)
-OPTIONAL MATCH (a)-[r_out:TRANSFERRED_TO]->(dst:Account)
+MATCH (a:Account)<-[rIn:TRANSFERRED_TO]-(src:Account)
+OPTIONAL MATCH (a)-[rOut:TRANSFERRED_TO]->(dst:Account)
 WITH a,
-     count(DISTINCT src)  AS incoming_conns,
-     count(DISTINCT dst)  AS outgoing_conns,
-     count(DISTINCT r_in) AS incoming_txns
-WHERE incoming_conns >= 100
-RETURN a.account_id,
-       incoming_conns + outgoing_conns AS total_connections,
-       incoming_conns, outgoing_conns, incoming_txns
-ORDER BY incoming_conns DESC
+     count(DISTINCT src)  AS incomingConns,
+     count(DISTINCT dst)  AS outgoingConns,
+     count(DISTINCT rIn) AS incomingTxns
+WHERE incomingConns >= 100
+RETURN a.accountId,
+       incomingConns + outgoingConns AS totalConnections,
+       incomingConns, outgoingConns, incomingTxns
+ORDER BY incomingConns DESC
 LIMIT 15
 ```
 
 ### 10. Rapid-turnover summary per account: ✓
 
 ```cypher
-MATCH (src:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)-[t_out:TRANSFERRED_TO]->(dst:Account)
-WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
-  AND t_out.transfer_timestamp <= t_in.transfer_timestamp + duration({hours: 24})
+MATCH (src:Account)-[tIn:TRANSFERRED_TO]->(mule:Account)-[tOut:TRANSFERRED_TO]->(dst:Account)
+WHERE tOut.transferTimestamp >= tIn.transferTimestamp
+  AND tOut.transferTimestamp <= tIn.transferTimestamp + duration({hours: 24})
   AND src <> dst
 WITH mule,
-     count(*) AS rapid_pairs,
-     avg(duration.inSeconds(t_in.transfer_timestamp, t_out.transfer_timestamp).seconds) / 3600.0 AS avg_hours
-WHERE rapid_pairs >= 50
-RETURN mule.account_id, rapid_pairs, round(avg_hours, 1) AS avg_turnaround_hours
-ORDER BY rapid_pairs DESC
+     count(*) AS rapidPairs,
+     avg(duration.inSeconds(tIn.transferTimestamp, tOut.transferTimestamp).seconds) / 3600.0 AS avgHours
+WHERE rapidPairs >= 50
+RETURN mule.accountId, rapidPairs, round(avgHours, 1) AS avgTurnaroundHours
+ORDER BY rapidPairs DESC
 LIMIT 15
 ```
 
@@ -703,11 +714,11 @@ inflow-vs-outflow symmetry is a cleaner denominator.
 MATCH (a:Account)-[t:TRANSFERRED_TO]->(:Account)
 WITH a, sum(t.amount) AS outflow
 WHERE a.balance > 0 AND outflow > 0
-RETURN a.account_id,
+RETURN a.accountId,
        round(a.balance, 2)            AS balance,
-       round(outflow, 2)              AS outflow_volume,
-       round(outflow / a.balance, 1)  AS velocity_ratio
-ORDER BY velocity_ratio DESC
+       round(outflow, 2)              AS outflowVolume,
+       round(outflow / a.balance, 1)  AS velocityRatio
+ORDER BY velocityRatio DESC
 LIMIT 25
 ```
 
@@ -717,10 +728,10 @@ LIMIT 25
 MATCH (a:Account)-[tr:TRANSFERRED_TO]-(:Account)
 OPTIONAL MATCH (a)-[tw:TRANSACTED_WITH]->(:Merchant)
 WITH a,
-     count(DISTINCT tr) AS transfer_count,
-     count(DISTINCT tw) AS merchant_count
-WHERE transfer_count >= 100 AND merchant_count < 20
-RETURN a.account_id, transfer_count, merchant_count
-ORDER BY transfer_count DESC
+     count(DISTINCT tr) AS transferCount,
+     count(DISTINCT tw) AS merchantCount
+WHERE transferCount >= 100 AND merchantCount < 20
+RETURN a.accountId, transferCount, merchantCount
+ORDER BY transferCount DESC
 LIMIT 25
 ```

@@ -24,7 +24,13 @@ from neo4j import Driver, GraphDatabase, Record
 from neo4j.exceptions import DriverError, Neo4jError
 
 from connection import load_connection
-from helpers import data_max_dates, first_row, query_error, since_param
+from helpers import (
+    data_max_dates,
+    first_row,
+    query_error,
+    since_param,
+    verify_or_exit,
+)
 from queries import QUERIES
 
 # Query 5 (fan-in) carries the 7-day transfer window the finders and stars share.
@@ -58,7 +64,7 @@ def main() -> None:
     uri, auth = load_connection()
 
     with GraphDatabase.driver(uri, auth=auth) as driver:
-        driver.verify_connectivity()
+        verify_or_exit(driver, uri)
         print(f"connected: {uri}")
         try:
             run_checks(driver)
@@ -69,16 +75,16 @@ def main() -> None:
 def run_checks(driver: Driver) -> None:
     """Find one anchor per laundering shape, then run its anchored visualization."""
     since = cutoff(driver)
-    print(f"  7-day window: transfer_timestamp >= {since}")
+    print(f"  7-day window: transferTimestamp >= {since}")
 
     # Anchor 1: recipient with the most distinct senders in the 7-day window.
     recs = timed(
         driver,
         "find collection account",
         "MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account) "
-        "WHERE t.transfer_timestamp >= datetime($since) "
-        "WITH dst.account_id AS recipient, "
-        "count(DISTINCT src.account_id) AS senders "
+        "WHERE t.transferTimestamp >= datetime($since) "
+        "WITH dst.accountId AS recipient, "
+        "count(DISTINCT src.accountId) AS senders "
         "RETURN recipient, senders ORDER BY senders DESC, recipient ASC LIMIT 5",
         since=since,
     )
@@ -91,9 +97,9 @@ def run_checks(driver: Driver) -> None:
         driver,
         "find spray account",
         "MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account) "
-        "WHERE t.transfer_timestamp >= datetime($since) "
-        "WITH src.account_id AS sender, "
-        "count(DISTINCT dst.account_id) AS recipients "
+        "WHERE t.transferTimestamp >= datetime($since) "
+        "WITH src.accountId AS sender, "
+        "count(DISTINCT dst.accountId) AS recipients "
         "RETURN sender, recipients ORDER BY recipients DESC, sender ASC LIMIT 5",
         since=since,
     )
@@ -105,21 +111,21 @@ def run_checks(driver: Driver) -> None:
     # Anchor 3: highest-volume reciprocal round-trip pair. Same form as Query 3: the
     # pattern binds one row per (f, g) combination, so each direction's sum is
     # divided by the other direction's leg count. The legs are counted on the scalar
-    # link_id, since count(DISTINCT <relationship>) keeps the GROUP BY out of the SQL.
+    # linkId, since count(DISTINCT <relationship>) keeps the GROUP BY out of the SQL.
     recs = timed(
         driver,
         "find round-trip pair",
         "MATCH (a:Account)-[f:TRANSFERRED_TO]->(b:Account)-[g:TRANSFERRED_TO]->(a) "
-        "WHERE a.account_id < b.account_id "
-        "WITH a.account_id AS a_id, b.account_id AS b_id, "
-        "count(DISTINCT f.link_id) AS n_ab, count(DISTINCT g.link_id) AS n_ba, "
+        "WHERE a.accountId < b.accountId "
+        "WITH a.accountId AS accountA, b.accountId AS accountB, "
+        "count(DISTINCT f.linkId) AS legsAb, count(DISTINCT g.linkId) AS legsBa, "
         "sum(f.amount) AS sf, sum(g.amount) AS sg "
-        "RETURN a_id, b_id, round(sf / n_ba + sg / n_ab, 2) AS vol, "
-        "n_ab + n_ba AS legs "
-        "ORDER BY vol DESC, a_id ASC, b_id ASC LIMIT 5",
+        "RETURN accountA, accountB, round(sf / legsBa + sg / legsAb, 2) AS vol, "
+        "legsAb + legsBa AS legs "
+        "ORDER BY vol DESC, accountA ASC, accountB ASC LIMIT 5",
     )
     top = first_row(recs, "the round-trip finder")
-    a_id, b_id = top["a_id"], top["b_id"]
+    a_id, b_id = top["accountA"], top["accountB"]
     print(f"    -> pair {a_id} <-> {b_id}, round-trip volume {top['vol']}")
 
     print("--- visualizations ---")
@@ -129,8 +135,8 @@ def run_checks(driver: Driver) -> None:
     timed(
         driver,
         f"VIZ fan-in star @ {coll_id}",
-        "MATCH (sender:Account)-[t:TRANSFERRED_TO]->(a:Account {account_id: $id}) "
-        "WHERE t.transfer_timestamp >= datetime($since) "
+        "MATCH (sender:Account)-[t:TRANSFERRED_TO]->(a:Account {accountId: $id}) "
+        "WHERE t.transferTimestamp >= datetime($since) "
         "RETURN sender, t, a LIMIT 50",
         id=coll_id,
         since=since,
@@ -138,9 +144,9 @@ def run_checks(driver: Driver) -> None:
     timed(
         driver,
         f"VIZ fan-out star @ {spray_id}",
-        "MATCH (a:Account {account_id: $id})"
+        "MATCH (a:Account {accountId: $id})"
         "-[t:TRANSFERRED_TO]->(recipient:Account) "
-        "WHERE t.transfer_timestamp >= datetime($since) "
+        "WHERE t.transferTimestamp >= datetime($since) "
         "RETURN a, t, recipient LIMIT 50",
         id=spray_id,
         since=since,
@@ -148,8 +154,8 @@ def run_checks(driver: Driver) -> None:
     timed(
         driver,
         f"VIZ round-trip @ {a_id} <-> {b_id}",
-        "MATCH (a:Account {account_id: $a})"
-        "-[t:TRANSFERRED_TO]-(b:Account {account_id: $b}) "
+        "MATCH (a:Account {accountId: $a})"
+        "-[t:TRANSFERRED_TO]-(b:Account {accountId: $b}) "
         "RETURN a, t, b",
         a=a_id,
         b=b_id,

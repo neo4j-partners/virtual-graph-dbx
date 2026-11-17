@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 260" width="640" height="260" role="img" aria-labelledby="title desc">
+  <title id="title">Finance Genie graph model</title>
+  <desc id="desc">Account nodes connect to Merchant nodes through TRANSACTED_WITH relationships. Account nodes connect to other Account nodes through TRANSFERRED_TO relationships.</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .edge { stroke: #4b5563; stroke-width: 2; fill: none; }
+    .arrow { fill: #4b5563; }
+    .label { fill: #1f2937; font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .props { fill: #4b5563; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .node-text { fill: #ffffff; font: 700 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .account { fill: #2563eb; }
+    .merchant { fill: #059669; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .edge { stroke: #9ca3af; }
+      .arrow { fill: #9ca3af; }
+      .label { fill: #e5e7eb; }
+      .props { fill: #9ca3af; }
+      .account { fill: #3b82f6; }
+      .merchant { fill: #10b981; }
+    }
+  </style>
+  <defs>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path class="arrow" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="640" height="260" rx="8"/>
+
+  <!-- TRANSFERRED_TO self-loop on Account -->
+  <path class="edge" d="M118,112 C60,20 220,20 162,112" marker-end="url(#head)"/>
+  <text class="label" x="196" y="58">TRANSFERRED_TO</text>
+  <text class="props" x="196" y="76">amount, transferTimestamp</text>
+
+  <!-- TRANSACTED_WITH from Account to Merchant -->
+  <path class="edge" d="M196,150 L442,150" marker-end="url(#head)"/>
+  <text class="label" x="320" y="138" text-anchor="middle">TRANSACTED_WITH</text>
+  <text class="props" x="320" y="172" text-anchor="middle">amount, txnTimestamp, txnHour</text>
+
+  <!-- Nodes -->
+  <circle class="account" cx="140" cy="150" r="54"/>
+  <text class="node-text" x="140" y="155" text-anchor="middle">Account</text>
+  <text class="props" x="140" y="228" text-anchor="middle">accountId, balance, region</text>
+
+  <circle class="merchant" cx="500" cy="150" r="54"/>
+  <text class="node-text" x="500" y="155" text-anchor="middle">Merchant</text>
+  <text class="props" x="500" y="228" text-anchor="middle">merchantId, merchantName, category</text>
+</svg>

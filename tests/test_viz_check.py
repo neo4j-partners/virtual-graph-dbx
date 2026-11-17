@@ -47,11 +47,11 @@ class VizCheckTests(unittest.TestCase):
             *MAX_DATES,
             ([{"recipient": 184, "senders": 24}], 0, 0),
             ([{"sender": 16570, "recipients": 21}], 0, 0),
-            ([{"a_id": 7855, "b_id": 13727, "vol": 1.0}], 0, 0),
+            ([{"accountA": 7855, "accountB": 13727, "vol": 1.0}], 0, 0),
             ([], 0, 0), ([], 0, 0), ([], 0, 0),
         ]
         out = self.run_main(driver)
-        self.assertIn("transfer_timestamp >= 2024-03-23T23:58:00Z", out)
+        self.assertIn("transferTimestamp >= 2024-03-23T23:58:00Z", out)
         self.assertIn("VIZ round-trip @ 7855 <-> 13727", out)
         for call in driver.execute_query.call_args_list[2:]:
             cypher, kwargs = call.args[0], call.kwargs
@@ -65,13 +65,13 @@ class VizCheckTests(unittest.TestCase):
             *MAX_DATES,
             ([{"recipient": 1, "senders": 2}], 0, 0),
             ([{"sender": 3, "recipients": 4}], 0, 0),
-            ([{"a_id": 5, "b_id": 6, "vol": 1.0}], 0, 0),
+            ([{"accountA": 5, "accountB": 6, "vol": 1.0}], 0, 0),
             ([], 0, 0), ([], 0, 0), ([], 0, 0),
         ]
         self.run_main(driver)
         finder = driver.execute_query.call_args_list[4].args[0]
-        self.assertIn("count(DISTINCT f.link_id) AS n_ab", finder)
-        self.assertIn("count(DISTINCT g.link_id) AS n_ba", finder)
+        self.assertIn("count(DISTINCT f.linkId) AS legsAb", finder)
+        self.assertIn("count(DISTINCT g.linkId) AS legsBa", finder)
         self.assertNotIn("count(DISTINCT f)", finder)
 
     def test_empty_finder_exits_cleanly(self) -> None:

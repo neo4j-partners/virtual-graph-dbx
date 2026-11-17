@@ -71,18 +71,18 @@ it sent. Runs in about a second.
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(:Account)
 WHERE t.amount >= 9000 AND t.amount < 10000
-WITH src.account_id AS account_id, count(t) AS near_threshold,
+WITH src.accountId AS accountId, count(t) AS nearThreshold,
      round(sum(t.amount), 2) AS total
-RETURN account_id, near_threshold, total
-ORDER BY near_threshold DESC, account_id ASC
+RETURN accountId, nearThreshold, total
+ORDER BY nearThreshold DESC, accountId ASC
 LIMIT 50
 ```
 
 Read it as: the accounts at the top sent the most transfers just under the limit. Each
 row is one account:
 
-* `account_id`: the account that sent the transfers.
-* `near_threshold`: how many of its transfers landed between $9,000 and $9,999. A 2
+* `accountId`: the account that sent the transfers.
+* `nearThreshold`: how many of its transfers landed between $9,000 and $9,999. A 2
   means it sent two such transfers.
 * `total`: those transfers added up, in dollars.
 
@@ -97,21 +97,21 @@ to 6 December 2022, and totals how much they sent. Runs in under a second.
 
 ```cypher
 MATCH (a:Account)-[t:TRANSFERRED_TO]->(:Account)
-WHERE a.opened_date >= date("2022-11-06")
-WITH a.account_id AS account_id, a.opened_date AS opened_date,
-     a.holder_age AS holder_age, count(t) AS transfers,
+WHERE a.openedDate >= date("2022-11-06")
+WITH a.accountId AS accountId, a.openedDate AS openedDate,
+     a.holderAge AS holderAge, count(t) AS transfers,
      round(sum(t.amount), 2) AS outflow
-RETURN account_id, opened_date, holder_age, transfers, outflow
-ORDER BY outflow DESC, account_id ASC
+RETURN accountId, openedDate, holderAge, transfers, outflow
+ORDER BY outflow DESC, accountId ASC
 LIMIT 50
 ```
 
 Read it as: the newest accounts near the top of this list already move money like
 established accounts. Each row is one account:
 
-* `account_id`: the account.
-* `opened_date`: the day the account was opened.
-* `holder_age`: the age of the person who owns it.
+* `accountId`: the account.
+* `openedDate`: the day the account was opened.
+* `holderAge`: the age of the person who owns it.
 * `transfers`: how many transfers the account sent.
 * `outflow`: the total dollars it sent out.
 
@@ -130,29 +130,29 @@ them. Runs in about a second.
 
 ```cypher
 MATCH (a:Account)-[f:TRANSFERRED_TO]->(b:Account)-[g:TRANSFERRED_TO]->(a)
-WHERE a.account_id < b.account_id
-WITH a.account_id AS a_id, b.account_id AS b_id,
-     count(DISTINCT f.link_id) AS n_ab, count(DISTINCT g.link_id) AS n_ba,
+WHERE a.accountId < b.accountId
+WITH a.accountId AS accountA, b.accountId AS accountB,
+     count(DISTINCT f.linkId) AS legsAb, count(DISTINCT g.linkId) AS legsBa,
      sum(f.amount) AS sf, sum(g.amount) AS sg
-RETURN a_id, b_id,
-       round(sf / n_ba + sg / n_ab, 2) AS round_trip_volume,
-       n_ab + n_ba                     AS leg_count
-ORDER BY round_trip_volume DESC, a_id ASC, b_id ASC
+RETURN accountA, accountB,
+       round(sf / legsBa + sg / legsAb, 2) AS roundTripVolume,
+       legsAb + legsBa                     AS legCount
+ORDER BY roundTripVolume DESC, accountA ASC, accountB ASC
 LIMIT 50
 ```
 
 Read it as: each row is a pair of accounts bouncing money between themselves. The
 columns:
 
-* `a_id` and `b_id`: the two accounts in the pair.
-* `round_trip_volume`: all the money sent between them, both directions added together,
+* `accountA` and `accountB`: the two accounts in the pair.
+* `roundTripVolume`: all the money sent between them, both directions added together,
   in dollars.
-* `leg_count`: how many transfers passed between them, counting both directions. A 4
+* `legCount`: how many transfers passed between them, counting both directions. A 4
   means four transfers.
 
 The pattern matches once for every combination of one transfer each way. A pair with 4
 transfers one way and 5 back produces 20 matches. The query therefore counts each
-direction with `count(DISTINCT f.link_id)` and `count(DISTINCT g.link_id)`. It divides each direction's sum by the other
+direction with `count(DISTINCT f.linkId)` and `count(DISTINCT g.linkId)`. It divides each direction's sum by the other
 direction's count. That gives the real transfer count and the real dollars.
 
 The top pair is 7855 and 13727, with one transfer each way totaling $122,721.78. This is
@@ -168,22 +168,22 @@ about a second.
 ```cypher
 MATCH (a:Account)-[t:TRANSFERRED_TO]->(:Account)
 WHERE a.balance > 0
-WITH a.account_id AS account_id, a.balance AS balance, sum(t.amount) AS outflow
-RETURN account_id,
+WITH a.accountId AS accountId, a.balance AS balance, sum(t.amount) AS outflow
+RETURN accountId,
        round(balance, 2)           AS balance,
-       round(outflow, 2)           AS outflow_volume,
-       round(outflow / balance, 1) AS velocity_ratio
-ORDER BY velocity_ratio DESC, account_id ASC
+       round(outflow, 2)           AS outflowVolume,
+       round(outflow / balance, 1) AS velocityRatio
+ORDER BY velocityRatio DESC, accountId ASC
 LIMIT 50
 ```
 
-Read it as: a high `velocity_ratio` means the account moved far more money than it
+Read it as: a high `velocityRatio` means the account moved far more money than it
 holds today. Treat it as one signal among several. Each row is one account:
 
-* `account_id`: the account.
+* `accountId`: the account.
 * `balance`: how much money it holds right now, in dollars.
-* `outflow_volume`: the total it has sent out, in dollars.
-* `velocity_ratio`: the outflow divided by the balance. A 287 means it moved about 287
+* `outflowVolume`: the total it has sent out, in dollars.
+* `velocityRatio`: the outflow divided by the balance. A 287 means it moved about 287
   times its current balance.
 
 ### Stage 3: Integration
@@ -197,19 +197,19 @@ of the data. It keeps the accounts with five or more. Runs in about a second.
 
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
-WITH dst.account_id AS recipient, count(DISTINCT src.account_id) AS senders,
+WHERE t.transferTimestamp >= datetime("2024-03-23T23:58:00Z")
+WITH dst.accountId AS recipient, count(DISTINCT src.accountId) AS senders,
      count(t) AS transfers, round(sum(t.amount), 2) AS inflow
 WITH recipient, senders, transfers, inflow
 WHERE senders >= 5
-RETURN recipient AS account_id, senders, transfers, inflow
-ORDER BY senders DESC, account_id ASC
+RETURN recipient AS accountId, senders, transfers, inflow
+ORDER BY senders DESC, accountId ASC
 LIMIT 50
 ```
 
 Read it as: every row is a candidate collection account. Each row is one account:
 
-* `account_id`: the account receiving the money, the one you are investigating.
+* `accountId`: the account receiving the money, the one you are investigating.
 * `senders`: how many different accounts paid into it that week.
 * `transfers`: how many separate transfers it received that week.
 * `inflow`: the total dollars it received that week.
@@ -223,19 +223,19 @@ Runs in about a second.
 
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
-WITH src.account_id AS sender, count(DISTINCT dst.account_id) AS recipients,
+WHERE t.transferTimestamp >= datetime("2024-03-23T23:58:00Z")
+WITH src.accountId AS sender, count(DISTINCT dst.accountId) AS recipients,
      count(t) AS transfers, round(sum(t.amount), 2) AS outflow
 WITH sender, recipients, transfers, outflow
 WHERE recipients >= 5
-RETURN sender AS account_id, recipients, transfers, outflow
-ORDER BY recipients DESC, account_id ASC
+RETURN sender AS accountId, recipients, transfers, outflow
+ORDER BY recipients DESC, accountId ASC
 LIMIT 50
 ```
 
 Read it as: every row is a candidate spray account. Each row is one account:
 
-* `account_id`: the account paying out, the one you are investigating.
+* `accountId`: the account paying out, the one you are investigating.
 * `recipients`: how many different accounts it paid that week.
 * `transfers`: how many separate transfers it sent that week.
 * `outflow`: the total dollars it sent that week.
@@ -257,29 +257,29 @@ most of that.
 
 ```cypher
 MATCH (a:Account)-[tr:TRANSFERRED_TO]-(:Account)
-WITH a.account_id AS account_id, count(tr) AS transfer_count
-WITH account_id, transfer_count
-WHERE transfer_count >= 100
-RETURN account_id, transfer_count
-ORDER BY transfer_count DESC, account_id ASC
+WITH a.accountId AS accountId, count(tr) AS transferCount
+WITH accountId, transferCount
+WHERE transferCount >= 100
+RETURN accountId, transferCount
+ORDER BY transferCount DESC, accountId ASC
 ```
 
 ```cypher
 MATCH (a:Account)-[tw:TRANSACTED_WITH]->(:Merchant)
-WITH a.account_id AS acct, count(tw) AS merchant_count
-RETURN acct AS account_id, merchant_count
+WITH a.accountId AS acct, count(tw) AS merchantCount
+RETURN acct AS accountId, merchantCount
 ```
 
 Each row in the first result is one account:
 
-* `account_id`: the account.
-* `transfer_count`: how many transfers it took part in, sending or receiving, added
+* `accountId`: the account.
+* `transferCount`: how many transfers it took part in, sending or receiving, added
   together. This is its total peer-to-peer activity.
 
 Each row in the second result is one account:
 
-* `account_id`: the account.
-* `merchant_count`: how many purchases it made from merchants. An account missing from
+* `accountId`: the account.
+* `merchantCount`: how many purchases it made from merchants. An account missing from
   this list made zero merchant purchases.
 
 Then line the two results up by account. Keep each account from the first list that
@@ -314,35 +314,35 @@ size, within 5%, to a different account. The outgoing transfer can happen at the
 as the incoming one or later. Runs in one to two seconds.
 
 ```cypher
-MATCH (a:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)
-      -[t_out:TRANSFERRED_TO]->(b:Account)
-WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
-  AND abs(t_out.amount - t_in.amount) <= 0.05 * t_in.amount
+MATCH (a:Account)-[tIn:TRANSFERRED_TO]->(mule:Account)
+      -[tOut:TRANSFERRED_TO]->(b:Account)
+WHERE tOut.transferTimestamp >= tIn.transferTimestamp
+  AND abs(tOut.amount - tIn.amount) <= 0.05 * tIn.amount
   AND a <> b
-WITH mule.account_id AS mule_id, t_in.link_id AS in_link, t_in.amount AS in_amount,
+WITH mule.accountId AS muleId, tIn.linkId AS inLink, tIn.amount AS inAmount,
      count(*) AS outs
-RETURN mule_id,
+RETURN muleId,
        sum(outs)                 AS passthroughs,
-       count(in_link)            AS forwarded_in,
-       round(sum(in_amount), 2)  AS volume
-ORDER BY passthroughs DESC, mule_id ASC
+       count(inLink)            AS forwardedIn,
+       round(sum(inAmount), 2)  AS volume
+ORDER BY passthroughs DESC, muleId ASC
 LIMIT 50
 ```
 
 Read it as: the accounts at the top are the busiest relay points in the network. Each row
 is one account:
 
-* `mule_id`: the account in the middle, the one that received and forwarded the money.
+* `muleId`: the account in the middle, the one that received and forwarded the money.
 * `passthroughs`: how many matching pairs of one incoming and one outgoing transfer it
   has. The outgoing transfer happens at the same time as the incoming one or later. One
   incoming transfer can match several outgoing ones.
-* `forwarded_in`: how many different incoming transfers were forwarded at least once.
+* `forwardedIn`: how many different incoming transfers were forwarded at least once.
 * `volume`: the dollars that came in on those forwarded transfers, each transfer counted
   once.
 
-The first `WITH` groups by mule and by the incoming transfer's `link_id`, so each
-incoming transfer is counted once in `forwarded_in` and `volume`. It groups on the id
-rather than on `t_in` itself, because a relationship used as a group key keeps the
+The first `WITH` groups by mule and by the incoming transfer's `linkId`, so each
+incoming transfer is counted once in `forwardedIn` and `volume`. It groups on the id
+rather than on `tIn` itself, because a relationship used as a group key keeps the
 aggregation from running on Databricks. The top row is 13914, with 599 pass-throughs
 built from 190 incoming transfers worth $46,634.25.
 
@@ -350,13 +350,13 @@ In this sample the query surfaces high-volume hubs. None of its top 50 accounts 
 fraud, and all 50 are already on the query 7 courier list. The query adds the relay shape
 to the picture. It adds no precision beyond query 7.
 
-The column is named `mule_id` on purpose. The query touches three
-accounts. An `account_id` alias would be ambiguous in the SQL the Virtual Graph generates,
-and the query would fail.
+The column is named `muleId` on purpose. The query touches three accounts. An alias
+that repeats a backing column name, such as the old `account_id`, fails in the SQL the
+Virtual Graph generates. See the [aliasing rule](best-practices.md#pattern-2-count-distinct-values-on-the-server) in `best-practices.md`.
 
 The textbook form of this query also requires the money to go out within 48 hours. The
 Virtual Graph cannot add a duration to a timestamp inside `WHERE`. A window written as
-`toInteger(t_out.transfer_timestamp) - toInteger(t_in.transfer_timestamp) < 172800` does
+`toInteger(tOut.transferTimestamp) - toInteger(tIn.transferTimestamp) < 172800` does
 run. This version keeps only the "out after in" ordering, so its results match the demo.
 
 #### 9. Shared-merchant burst: many accounts, one shop, one day
@@ -368,13 +368,13 @@ merchant. Runs in 5 to 9 seconds.
 
 ```cypher
 MATCH (a:Account)-[t:TRANSACTED_WITH]->(m:Merchant)
-WITH m, date(t.txn_timestamp) AS day,
-     collect(DISTINCT a.account_id) AS accounts,
+WITH m, date(t.txnTimestamp) AS day,
+     collect(DISTINCT a.accountId) AS accounts,
      count(t)                       AS txns
 WHERE size(accounts) >= 4 AND txns <= 200
-RETURN m.merchant_id AS merchant_id, m.merchant_name AS merchant_name, day,
-       size(accounts) AS account_count, txns, accounts
-ORDER BY account_count DESC, merchant_id ASC, day ASC
+RETURN m.merchantId AS merchantId, m.merchantName AS merchantName, day,
+       size(accounts) AS accountCount, txns, accounts
+ORDER BY accountCount DESC, merchantId ASC, day ASC
 LIMIT 50
 ```
 
@@ -384,9 +384,9 @@ It never applies to this sample, because the busiest merchant day has 7 purchase
 Read it as: each row is one merchant on one day where a group of accounts converged. Look
 for the same accounts showing up together across several rows. The columns:
 
-* `merchant_id` and `merchant_name`: the merchant.
+* `merchantId` and `merchantName`: the merchant.
 * `day`: the day of the burst.
-* `account_count`: how many different accounts bought there that day.
+* `accountCount`: how many different accounts bought there that day.
 * `txns`: how many purchases the merchant had that day in total.
 * `accounts`: the list of account ids that bought there that day.
 
@@ -407,38 +407,38 @@ pairs. The counting and averaging run on Databricks, which returns one row per a
 It takes about a second.
 
 ```cypher
-MATCH (src:Account)-[t_in:TRANSFERRED_TO]->(mule:Account)
-      -[t_out:TRANSFERRED_TO]->(dst:Account)
-WHERE t_out.transfer_timestamp >= t_in.transfer_timestamp
+MATCH (src:Account)-[tIn:TRANSFERRED_TO]->(mule:Account)
+      -[tOut:TRANSFERRED_TO]->(dst:Account)
+WHERE tOut.transferTimestamp >= tIn.transferTimestamp
   AND src <> dst
-WITH mule.account_id AS mule_id,
-     count(*) AS rapid_pairs,
-     avg(toInteger(t_out.transfer_timestamp)
-         - toInteger(t_in.transfer_timestamp)) AS avg_turnaround_s
-WITH mule_id, rapid_pairs, avg_turnaround_s
-WHERE rapid_pairs >= 50
-RETURN mule_id AS account_id, rapid_pairs, avg_turnaround_s
-ORDER BY rapid_pairs DESC, account_id ASC
+WITH mule.accountId AS muleId,
+     count(*) AS rapidPairs,
+     avg(toInteger(tOut.transferTimestamp)
+         - toInteger(tIn.transferTimestamp)) AS avgTurnaroundSeconds
+WITH muleId, rapidPairs, avgTurnaroundSeconds
+WHERE rapidPairs >= 50
+RETURN muleId AS accountId, rapidPairs, avgTurnaroundSeconds
+ORDER BY rapidPairs DESC, accountId ASC
 LIMIT 50
 ```
 
-Read it as: a high `rapid_pairs` count means the account keeps forwarding what it receives.
+Read it as: a high `rapidPairs` count means the account keeps forwarding what it receives.
 A short turnaround makes the signal stronger. Each row is one account:
 
-* `account_id`: the account in the middle.
-* `rapid_pairs`: how many receive-then-forward pairs it took part in.
-* `avg_turnaround_s`: the average time between receiving money and sending money on, in
+* `accountId`: the account in the middle.
+* `rapidPairs`: how many receive-then-forward pairs it took part in.
+* `avgTurnaroundSeconds`: the average time between receiving money and sending money on, in
   seconds.
 
 `toInteger()` turns each timestamp into epoch seconds, and Databricks computes the
 average. The demo converts the seconds to hours on the client and prints them as
-`avg_turnaround_hours`. `avg(duration.inSeconds(...))` returns the same hours, but it keeps
+`avgTurnaroundHours`. `avg(duration.inSeconds(...))` returns the same hours, but it keeps
 the aggregation in the graph engine. That form took about 208 seconds. Reading
 `.epochMillis` off the timestamps raises an `01N52` unknown-property warning.
 
 The textbook form also limits each pair to 24 hours. The Virtual Graph cannot add a
 duration to a timestamp inside `WHERE`. Adding
-`AND toInteger(t_out.transfer_timestamp) - toInteger(t_in.transfer_timestamp) < 86400`
+`AND toInteger(tOut.transferTimestamp) - toInteger(tIn.transferTimestamp) < 86400`
 does run, in about 1.6 seconds. It changes the results, so this version averages over
 every forward-after-receive pair to match the demo. The word "rapid" in the name describes the intent. The query
 itself enforces no time limit. In this sample
@@ -455,7 +455,7 @@ query 7.
 Query 11 looks for money that travels in a loop of two to four hops back to where it
 started. The Virtual Graph rejects its quantified path pattern with `42NG1`, so the demo
 prints "Not run" for it. Run it against a loaded Aura graph instead. The cycles recipe in
-[`best-practices.md`](../best-practices.md#adaptation-recipes) describes a workaround on
+[`best-practices.md`](best-practices.md#adaptation-recipes) describes a workaround on
 the Virtual Graph.
 
 ## Visualize the suspects
@@ -466,7 +466,7 @@ Aura Workspace Query tab to draw the picture. These return node and relationship
 variables, so the Workspace renders them as a graph.
 
 **Anchor on a specific account id.** A filter such as
-`{account_id: 3375}` pushes a selective filter down to the warehouse, so the query stays
+`{accountId: 3375}` pushes a selective filter down to the warehouse, so the query stays
 fast and returns few enough nodes to draw. The same pattern without an anchor scans the
 whole table and returns an arbitrary slice of the network. The example ids below are real
 accounts from the test data, and all of them are labeled fraud. Swap in your own.
@@ -481,8 +481,8 @@ it that week, fanned out around the center. Account 3375 below received 26 trans
 20 different senders that week. The query returns all 26 in about a second.
 
 ```cypher
-MATCH (sender:Account)-[t:TRANSFERRED_TO]->(a:Account {account_id: 3375})
-WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
+MATCH (sender:Account)-[t:TRANSFERRED_TO]->(a:Account {accountId: 3375})
+WHERE t.transferTimestamp >= datetime("2024-03-23T23:58:00Z")
 RETURN sender, t, a
 LIMIT 50
 ```
@@ -493,8 +493,8 @@ anchor above.
 
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
-WITH dst.account_id AS recipient, count(DISTINCT src.account_id) AS senders
+WHERE t.transferTimestamp >= datetime("2024-03-23T23:58:00Z")
+WITH dst.accountId AS recipient, count(DISTINCT src.accountId) AS senders
 RETURN recipient, senders
 ORDER BY senders DESC, recipient
 LIMIT 5
@@ -512,8 +512,8 @@ out around the center: the mirror image of the collection star. Account 2599 bel
 second.
 
 ```cypher
-MATCH (a:Account {account_id: 2599})-[t:TRANSFERRED_TO]->(recipient:Account)
-WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
+MATCH (a:Account {accountId: 2599})-[t:TRANSFERRED_TO]->(recipient:Account)
+WHERE t.transferTimestamp >= datetime("2024-03-23T23:58:00Z")
 RETURN a, t, recipient
 LIMIT 50
 ```
@@ -523,8 +523,8 @@ recipients in the last week.
 
 ```cypher
 MATCH (src:Account)-[t:TRANSFERRED_TO]->(dst:Account)
-WHERE t.transfer_timestamp >= datetime("2024-03-23T23:58:00Z")
-WITH src.account_id AS sender, count(DISTINCT dst.account_id) AS recipients
+WHERE t.transferTimestamp >= datetime("2024-03-23T23:58:00Z")
+WITH src.accountId AS sender, count(DISTINCT dst.accountId) AS recipients
 RETURN sender, recipients
 ORDER BY recipients DESC, sender
 LIMIT 5
@@ -533,8 +533,9 @@ LIMIT 5
 The finder's top row is account 16570, with 21 recipients. Account 16570 is not labeled
 fraud, so check a candidate against the other lists before you present it as a suspect.
 
-Keep the `sender` alias. The query touches two accounts, so an `account_id` alias would
-be ambiguous in the generated SQL and the query would fail.
+Keep the `sender` alias. The query touches two accounts. An alias that repeats a
+backing column name, such as the old `account_id`, fails in the generated SQL. See the
+[aliasing rule](best-practices.md#pattern-2-count-distinct-values-on-the-server) in `best-practices.md`.
 
 #### See a round-trip pair: the wash edge
 
@@ -543,13 +544,13 @@ running between them in both directions, which is the wash shape in its simplest
 The top pair, 7855 and 13727, returns its two transfers, one each way, in about a second.
 
 ```cypher
-MATCH (a:Account {account_id: 7855})-[t:TRANSFERRED_TO]-(b:Account {account_id: 13727})
+MATCH (a:Account {accountId: 7855})-[t:TRANSFERRED_TO]-(b:Account {accountId: 13727})
 RETURN a, t, b
 ```
 
 The basic examples add more warm-up and visualization queries. They cover ego networks
 around merchants, two accounts linked through a shared merchant, and transfer chains. See
-[`basic-graph-examples.md`](../basic-graph-examples.md). The same anchoring rule applies
+[`basic-graph-examples.md`](basic-graph-examples.md). The same anchoring rule applies
 to all of them.
 
 ## How it all ties together

@@ -1,0 +1,185 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 774" width="960" role="img" aria-labelledby="t d">
+  <title id="t">Virtual Graph setup flow</title>
+  <desc id="d">A seven-step swimlane diagram showing a user connecting an Amazon S3 table bucket in the Aura console, Data Importer discovering the schema through DuckDB, and Aura creating and starting the Virtual Graph instance.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="10" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0 L10 4 L0 8 z" fill="#374151"/>
+    </marker>
+  </defs>
+  <rect width="960" height="774" fill="#FFFFFF"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#1F2937">
+
+    <!-- Lane bands -->
+    <g fill="none" stroke-width="1.5" stroke-dasharray="6 4">
+      <rect x="12" y="12" width="936" height="94" rx="8" fill="#F9FAFB" stroke="#6B7280"/>
+      <rect x="12" y="114" width="936" height="187" rx="8" fill="#F5F9FE" stroke="#2563EB"/>
+      <rect x="12" y="309" width="804" height="137" rx="8" fill="#F5F9FE" stroke="#2563EB"/>
+      <rect x="12" y="454" width="804" height="245" rx="8" fill="#FAF5FF" stroke="#7C3AED"/>
+    </g>
+
+    <!-- Lane labels -->
+    <g font-size="15" font-weight="700">
+      <text x="24" y="42">User</text>
+      <text x="24" y="144">Aura console</text>
+      <text x="24" y="339">Data Importer</text>
+      <text x="24" y="484">Aura</text>
+    </g>
+    <text x="24" y="357" font-size="12" fill="#6B7280">schema discovery</text>
+
+    <!-- Amazon S3 Tables column -->
+    <rect x="832" y="309" width="116" height="390" rx="8" fill="#FFF4E5" stroke="#E8890C" stroke-width="1.5"/>
+    <g text-anchor="middle">
+      <text x="890" y="482" font-size="15" font-weight="700">Amazon</text>
+      <text x="890" y="500" font-size="15" font-weight="700">S3 Tables</text>
+      <text x="890" y="526" font-size="12" fill="#6B7280">Table bucket</text>
+      <text x="890" y="542" font-size="12" fill="#6B7280">Iceberg REST</text>
+      <text x="890" y="558" font-size="12" fill="#6B7280">endpoint</text>
+    </g>
+
+    <!-- USER lane boxes -->
+    <g fill="#F3F4F6" stroke="#6B7280" stroke-width="1.5">
+      <rect x="156" y="24" width="232" height="70" rx="8"/>
+      <rect x="412" y="24" width="232" height="70" rx="8"/>
+      <rect x="668" y="24" width="264" height="70" rx="8"/>
+    </g>
+    <g font-size="15" font-weight="700">
+      <text x="172" y="46">Create a Virtual Graph</text>
+      <text x="428" y="46">Add the data source</text>
+      <text x="684" y="46">Save the model</text>
+    </g>
+    <g font-size="12">
+      <text x="172" y="64">Name, AWS as cloud provider,</text>
+      <text x="172" y="79">region, memory 4 GB or 8 GB</text>
+      <text x="428" y="64">Choose AWS S3 Tables and</text>
+      <text x="428" y="79">fill in the form</text>
+      <text x="684" y="64">After editing the graph model</text>
+    </g>
+
+    <!-- CONSOLE lane: form -->
+    <rect x="156" y="126" width="392" height="130" rx="8" fill="#E8F1FB" stroke="#2563EB" stroke-width="1.5"/>
+    <text x="172" y="146" font-size="15" font-weight="700">AWS S3 Tables form</text>
+    <g stroke-width="1">
+      <rect x="172" y="156" width="116" height="20" rx="4" fill="#FFFFFF" stroke="#2563EB"/>
+      <rect x="294" y="156" width="116" height="20" rx="4" fill="#FFFFFF" stroke="#2563EB"/>
+      <rect x="416" y="156" width="116" height="20" rx="4" fill="#FFFFFF" stroke="#2563EB"/>
+      <rect x="172" y="180" width="116" height="20" rx="4" fill="#ECFDF5" stroke="#059669"/>
+      <rect x="294" y="180" width="116" height="20" rx="4" fill="#ECFDF5" stroke="#059669"/>
+      <rect x="172" y="204" width="360" height="36" rx="4" fill="#ECFDF5" stroke="#059669"/>
+    </g>
+    <g font-size="12">
+      <text x="180" y="170">Table Bucket ARN</text>
+      <text x="302" y="170">Namespace</text>
+      <text x="424" y="170">AWS Region</text>
+      <text x="180" y="194">AWS Key</text>
+      <text x="302" y="194">AWS Secret</text>
+      <text x="180" y="219">AWS Session Token</text>
+      <text x="180" y="233" fill="#6B7280">(optional, required for temporary credentials)</text>
+    </g>
+
+    <!-- CONSOLE lane: notes -->
+    <g font-size="12" fill="#6B7280">
+      <text x="156" y="274">Region is its own field because</text>
+      <text x="156" y="289">it builds the DuckDB secret</text>
+    </g>
+
+    <!-- CONSOLE lane: verify and model editor -->
+    <rect x="564" y="126" width="200" height="130" rx="8" fill="#E8F1FB" stroke="#2563EB" stroke-width="1.5"/>
+    <text x="580" y="150" font-size="15" font-weight="700">Verify and model</text>
+    <g font-size="12">
+      <text x="580" y="172">Table and column metadata</text>
+      <text x="580" y="188">return. Verify lists the</text>
+      <text x="580" y="204">tables. The model editor</text>
+      <text x="580" y="220">proposes a graph model;</text>
+      <text x="580" y="236">user edits and saves.</text>
+    </g>
+
+    <!-- POD lane: schema job -->
+    <rect x="156" y="321" width="608" height="95" rx="8" fill="#E8F1FB" stroke="#2563EB" stroke-width="1.5"/>
+    <text x="172" y="343" font-size="15" font-weight="700">Schema job</text>
+    <g font-size="12">
+      <text x="172" y="363">Reads table and column metadata</text>
+      <text x="172" y="378">from S3 Tables over the Iceberg</text>
+      <text x="172" y="393">REST endpoint</text>
+    </g>
+    <rect x="420" y="333" width="328" height="71" rx="8" fill="#FEF9C3" stroke="#CA8A04" stroke-width="1.5"/>
+    <text x="436" y="355" font-size="15" font-weight="700">DuckDB</text>
+    <g font-size="12">
+      <text x="436" y="373">Attaches the table bucket read-only</text>
+      <text x="436" y="388">Describes each table one at a time</text>
+    </g>
+    <text x="156" y="434" font-size="12" fill="#6B7280">Sequential describe because of <tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">duckdb-iceberg</tspan> issue 1146</text>
+
+    <!-- AURA lane: instance setup -->
+    <rect x="156" y="466" width="644" height="64" rx="8" fill="#F3E8FF" stroke="#7C3AED" stroke-width="1.5"/>
+    <text x="172" y="490" font-size="15" font-weight="700">Instance setup</text>
+    <g font-size="12">
+      <text x="172" y="510">Creates the Virtual Graph instance from the saved model and credentials</text>
+      <text x="172" y="524">Pings the instance to confirm it is healthy</text>
+    </g>
+
+    <!-- AURA lane: Virtual Graph instance -->
+    <rect x="156" y="566" width="644" height="121" rx="8" fill="#E8F1FB" stroke="#2563EB" stroke-width="1.5"/>
+    <text x="172" y="588" font-size="15" font-weight="700">Virtual Graph instance <tspan font-size="12" font-weight="400" fill="#6B7280" dx="6">stateless</tspan></text>
+    <rect x="172" y="602" width="300" height="72" rx="8" fill="#FEF9C3" stroke="#CA8A04" stroke-width="1.5"/>
+    <text x="188" y="624" font-size="15" font-weight="700">Embedded DuckDB</text>
+    <g font-size="12">
+      <text x="188" y="643">Graph Engine attaches the bucket</text>
+      <text x="188" y="659">as catalog <tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">virtual_graph</tspan></text>
+    </g>
+    <text x="496" y="624" font-size="15" font-weight="700">Graph Engine</text>
+    <g font-size="12">
+      <text x="496" y="643">Translates Cypher into SQL</text>
+      <text x="496" y="659">and runs it in DuckDB</text>
+    </g>
+
+    <!-- Arrows -->
+    <g stroke="#374151" stroke-width="1.75" fill="none" marker-end="url(#arrow)">
+      <path d="M388 59 H412"/>
+      <path d="M450 94 V126"/>
+      <path d="M370 256 V321"/>
+      <path d="M764 369 H780 q6 -10 12 0 H832"/>
+      <path d="M668 321 V256"/>
+      <path d="M720 126 V94"/>
+      <path d="M786 94 V466"/>
+      <path d="M478 530 V566"/>
+      <path d="M800 634 H832"/>
+    </g>
+
+    <!-- Arrow labels -->
+    <g fill="#FFFFFF">
+      <rect x="456" y="540" width="44" height="16"/>
+    </g>
+    <g font-size="12" text-anchor="middle">
+      <text x="478" y="552">starts</text>
+    </g>
+
+    <!-- Step numbers -->
+    <g fill="#1F2937">
+      <circle cx="156" cy="24" r="11"/>
+      <circle cx="412" cy="24" r="11"/>
+      <circle cx="370" cy="288" r="11"/>
+      <circle cx="156" cy="321" r="11"/>
+      <circle cx="564" cy="126" r="11"/>
+      <circle cx="668" cy="24" r="11"/>
+      <circle cx="156" cy="466" r="11"/>
+      <circle cx="156" cy="566" r="11"/>
+      <circle cx="150" cy="729" r="11"/>
+    </g>
+    <g fill="#FFFFFF" font-size="12" font-weight="700" text-anchor="middle">
+      <text x="156" y="28">1</text>
+      <text x="412" y="28">2</text>
+      <text x="370" y="292">3</text>
+      <text x="156" y="325">4</text>
+      <text x="564" y="130">5</text>
+      <text x="668" y="28">6</text>
+      <text x="156" y="470">6</text>
+      <text x="156" y="570">7</text>
+      <text x="150" y="733">7</text>
+    </g>
+
+    <!-- Annotations and footer -->
+    <text x="168" y="733" font-size="12" fill="#6B7280">Creation errors usually mean an incomplete model, wrong or expired credentials, or missing source permissions</text>
+    <text x="24" y="759" font-size="12" fill="#6B7280">Credentials are stored by Aura.</text>
+  </g>
+</svg>

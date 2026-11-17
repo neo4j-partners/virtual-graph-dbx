@@ -155,7 +155,7 @@ class RunCypherAndMaxDatesTests(unittest.TestCase):
         rows = helpers.run_cypher(driver, "RETURN $a", {"a": 5}, 12.5)
         self.assertEqual(rows, [{"x": 1}])
         session.begin_transaction.assert_called_once_with(timeout=12.5)
-        tx.run.assert_called_once_with("RETURN $a", a=5)
+        tx.run.assert_called_once_with("RETURN $a", parameters={"a": 5})
 
     def test_data_max_dates(self) -> None:
         driver = MagicMock()

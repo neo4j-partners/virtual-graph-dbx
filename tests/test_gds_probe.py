@@ -24,12 +24,12 @@ def procedure_error(message: str) -> Neo4jError:
 
 class PickPropsTests(unittest.TestCase):
     def test_skips_identifier_keys(self) -> None:
-        props = {"account_id": 7, "account_name": "x", "balance": 12.5,
-                 "holder_age": 40}
-        self.assertEqual(gds_probe._pick_props(props), ("balance", "account_name"))
+        props = {"accountId": 7, "accountName": "x", "balance": 12.5,
+                 "holderAge": 40}
+        self.assertEqual(gds_probe._pick_props(props), ("balance", "accountName"))
 
     def test_returns_none_when_only_identifiers_are_numeric(self) -> None:
-        props = {"account_id": 7, "id": 1, "flag": True, "name": "x"}
+        props = {"accountId": 7, "id": 1, "flag": True, "name": "x"}
         self.assertEqual(gds_probe._pick_props(props), (None, "name"))
 
 
