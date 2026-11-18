@@ -78,7 +78,7 @@ ATTACH 'arn:aws:s3tables:<region>:<account-id>:bucket/<table-bucket>' AS s3_tabl
    ACCESS_DELEGATION_MODE 'none');
 ```
 
-Data Importer reads columns by describing each table one at a time. The usual DuckDB approach, selecting from `information_schema`, fails because of an open bug in the DuckDB Iceberg extension, duckdb-iceberg issue 1146. A large namespace therefore takes longer to discover.
+Data Importer reads columns by describing each table one at a time. A large namespace therefore takes longer to discover.
 
 ### Graph Engine
 
@@ -212,6 +212,19 @@ Every Aura user queries as a reader. Only some project roles can create, change,
 
 **Inferred:** An S3 failure surfaces as a credentials error in Data Importer, because DuckDB appends a generic authentication block to any object-store failure, including a 403. Check CloudTrail for the denied `s3tables` action before rotating keys.
 
+### Observed AWS calls
+
+DuckDB reaches the bucket through the S3 Tables Iceberg REST endpoint. In this test, AWS CloudTrail recorded four kinds of read-only management call from Aura:
+
+- `s3tables:GetTableBucket`
+- `s3tables:ListNamespaces`
+- `s3tables:ListTables`
+- `s3tables:GetTableMetadataLocation`
+
+CloudTrail recorded no AWS STS calls from Aura. Aura uses the stored credentials exactly as entered and does not renew them. This is why expired credentials must be replaced by hand.
+
+The trail did not log reads of the data files.
+
 ## Performance and memory
 
 - **Filter pushdown:** In a DuckDB experiment on Iceberg tables, filters on leaf tables pushed into `ICEBERG_SCAN`. Join conditions ran as hash joins inside DuckDB. A filter on a join table pushed only because it was an attribute of that table.
@@ -259,4 +272,3 @@ Every Aura user queries as a reader. Only some project roles can create, change,
 - [Virtual Graph self-managed documentation](https://neo4j.com/docs/virtual-graph/self-managed/)
 - [Amazon S3 Tables Iceberg REST endpoint](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-integrating-open-source.html)
 - [Access management for S3 Tables](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-setting-up.html)
-- [duckdb-iceberg issue 1146](https://github.com/duckdb/duckdb-iceberg/issues/1146)

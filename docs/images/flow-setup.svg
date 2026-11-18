@@ -108,7 +108,6 @@
       <text x="436" y="373">Attaches the table bucket read-only</text>
       <text x="436" y="388">Describes each table one at a time</text>
     </g>
-    <text x="156" y="434" font-size="12" fill="#6B7280">Sequential describe because of <tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">duckdb-iceberg</tspan> issue 1146</text>
 
     <!-- AURA lane: instance setup -->
     <rect x="156" y="466" width="644" height="64" rx="8" fill="#F3E8FF" stroke="#7C3AED" stroke-width="1.5"/>

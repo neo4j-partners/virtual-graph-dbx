@@ -174,7 +174,8 @@ The same `count(DISTINCT ...)` form gives hub statistics. In-degree is
 `recipient`, `sender`, or `muleId` in the `WITH`. Never alias it to a backing column
 name. The original snake_case alias `account_id` repeated a backing column name. In a
 query that also binds `src`, `WITH dst.account_id AS account_id` failed with
-`AMBIGUOUS_REFERENCE`. The camelCase alias `accountId` has not been tested. Keep the
+`AMBIGUOUS_REFERENCE` on Databricks. On S3 Tables, neither `account_id` nor the camelCase
+alias `accountId` collides, as of 2026-11-17. Databricks has not been retested. Keep the
 distinct alias until it is. Rename the key in `RETURN` with `RETURN recipient AS
 accountId` if you need the familiar column name. The pass-through mule query aliases
 its key as `muleId` for the same reason. The `TRANSACTED_WITH` backing table also

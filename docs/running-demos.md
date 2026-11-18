@@ -74,7 +74,10 @@ A flag the chosen demo does not read prints a warning on stderr, such as
 Counts, breakdowns, and small anchored traversals that show the value of the
 relationships without any fraud logic.
 
-- All queries run. Each one finishes in 2s or less, and warm runs take 0.4 to 0.9s.
+- On Databricks, all queries run. Each one finishes in 2s or less, and warm runs take
+  0.4 to 0.9s.
+- On S3 Tables, queries 1 to 14 run in 0.4 to 2.8s. Query 15 drops the Bolt connection,
+  so the demo exits 1. This is a known issue, reported to the Virtual Graph product team.
 - `graph` queries return nodes and relationships, so the CLI prints only a row count and
   timing. Paste them into the Aura Workspace Query tab to see the picture.
 - The demo anchors on account 17813 and merchant 1 and prints the IDs it used. If either

@@ -75,6 +75,19 @@ export NAMESPACE=finance_genie
 export TABLE_BUCKET_ARN=arn:aws:s3tables:${AWS_REGION}:${AWS_ACCOUNT_ID}:bucket/${TABLE_BUCKET}
 ```
 
+### Renew the credentials
+
+The temporary credentials last at most one hour. To get new ones without reloading the
+tables, run:
+
+```bash
+uv run aws/setup_s3_tables.py --profile default --creds-only
+```
+
+The script writes the new key, secret, and session token to `.env.aws`. Paste them into
+the Aura data source, as [Refresh the credentials in Aura](#refresh-the-credentials-in-aura)
+describes.
+
 ## Step 1: Create the table bucket and namespace
 
 A table bucket is an S3 bucket type built for Iceberg tables. A namespace groups tables
@@ -169,14 +182,8 @@ aws sts assume-role --duration-seconds 3600 \
 ```
 
 The temporary credentials expire. Assumed from an SSO session, they last at most one
-hour. After that, the Virtual Graph loses access to the data. Refresh them without
-reloading the tables, then paste the new key, secret, and session token into the Aura
-data source. [Refresh the credentials in Aura](#refresh-the-credentials-in-aura) shows
-where. The refresh command is:
-
-```bash
-uv run aws/setup_s3_tables.py --profile default --creds-only
-```
+hour. After that, the Virtual Graph loses access to the data.
+[Renew the credentials](#renew-the-credentials) shows how to get new ones.
 
 A refresh rewrites the role's trust policy and inline policy, so it needs the same IAM
 write permissions as the first run. After a refresh, only the identity that ran it can
@@ -187,6 +194,60 @@ The script retries the verify step for about 30 seconds.
 
 If your organization allows IAM users, a user with the same policy and a long-lived
 access key avoids the refresh. Leave the session token blank in that case.
+
+### Check whether your organization blocks IAM users
+
+These commands are read-only. Run them with the same profile as the setup script.
+
+Show who you are signed in as:
+
+```bash
+aws sts get-caller-identity --profile default
+```
+
+Check that the account is in an organization with service control policies enabled:
+
+```bash
+aws organizations describe-organization --profile default \
+  --query 'Organization.AvailablePolicyTypes'
+```
+
+Get the full ARN of your SSO role, including its IAM path:
+
+```bash
+aws iam get-role --profile default \
+  --role-name AWSReservedSSO_AdministratorAccess_<id> --query Role.Arn --output text
+```
+
+Simulate the IAM actions for that role. `AllowedByOrganizations` is `False` when a
+service control policy denies the action:
+
+```bash
+aws iam simulate-principal-policy --profile default \
+  --policy-source-arn <sso-role-arn> \
+  --action-names iam:CreateUser iam:CreateRole iam:PutRolePolicy sts:AssumeRole \
+  --query 'EvaluationResults[].{action:EvalActionName,decision:EvalDecision,org:OrganizationsDecisionDetail.AllowedByOrganizations}' \
+  --output table
+```
+
+Find earlier `CreateUser` attempts. IAM events are recorded in `us-east-1`:
+
+```bash
+aws cloudtrail lookup-events --profile default --region us-east-1 \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=CreateUser \
+  --max-results 5
+```
+
+Check the role's maximum session duration:
+
+```bash
+aws iam get-role --profile default --role-name aura-virtual-graph-read \
+  --query Role.MaxSessionDuration
+```
+
+Raising it does not help when you run the script from an SSO session. Assuming a role
+from another role's session is role chaining, and AWS caps a chained session at one
+hour.
 
 ## Step 4: Connect the S3 table bucket in Aura
 
@@ -221,8 +282,9 @@ the policy and run the script again.
 ### Refresh the credentials in Aura
 
 The credentials in the data source are temporary. When they expire, the Virtual Graph
-loses access to the tables. Run the refresh command from Step 3 to get new values. Then
-update the data source in Aura:
+loses access to the tables. Run the command in
+[Renew the credentials](#renew-the-credentials) to get new values. Then update the data
+source in Aura:
 
 1. Go to **Import → Data sources**.
 2. Select the S3 table bucket data source to open its **View details** panel.

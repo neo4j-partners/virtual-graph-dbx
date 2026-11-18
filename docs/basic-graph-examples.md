@@ -64,6 +64,9 @@ execution per statement. Most of the wall time is the Virtual Graph engine, Bolt
 network. Queries that return TIMESTAMP columns add one uncached `current_timezone()` round
 trip of about 60ms. Treat the timings as rough.
 
+On S3 Tables, a run on 2026-11-17 took 0.4 to 2.8s per query for queries 1 to 14. Query 15
+drops the connection on S3 Tables, as its section explains.
+
 ## Counts and breakdowns (table)
 
 ### 1. How many accounts
@@ -206,8 +209,8 @@ LIMIT 25
 
 ## Pushdown demonstrations
 
-The last four queries show how the Virtual Graph splits and limits work. Each one runs in
-about a second, and a cold run of query 15 can take 2s.
+The last four queries show how the Virtual Graph splits and limits work. On Databricks, each
+one runs in about a second, and a cold run of query 15 can take 2s.
 
 ### 12. Count accounts and merchants in one statement
 
@@ -257,6 +260,11 @@ This query has no `ORDER BY`, so it returns an arbitrary 25 paths. A sort and a 
 both push into the SQL. The sort makes the warehouse build every four-hop chain before it
 can keep the first 25. Without the sort, the warehouse can stop once it has 25 chains. With
 `ORDER BY a.accountId` added, the query ran past a 90s timeout.
+
+> **On S3 Tables:** This query drops the Bolt connection with `SessionExpired`, and the
+> connection takes about 40 to 50s to recover. The three-hop version returns in under 3s.
+> This is a known issue, reported to the Virtual Graph product team. Don't run it while
+> other queries share the instance.
 
 ```cypher
 MATCH p=(a:Account)-[:TRANSFERRED_TO]->(b:Account)-[:TRANSFERRED_TO]->(c:Account)

@@ -25,8 +25,9 @@ Two adaptations remain:
 
 An aggregation over two ``Account`` variables names its key ``recipient``, ``sender`` or
 ``muleId``. An alias equal to a backing column name, such as the old ``account_id``,
-failed in the pushed-down SQL with ``AMBIGUOUS_REFERENCE``. ``accountId`` is not a
-column name, and whether it collides is untested.
+failed in the pushed-down SQL with ``AMBIGUOUS_REFERENCE`` on Databricks. On S3 Tables,
+neither ``account_id`` nor ``accountId`` collides, as of 2026-11-17. Databricks has not
+been retested, so the distinct aliases stay.
 """
 
 from __future__ import annotations
@@ -282,7 +283,8 @@ LIMIT 50
         number=10,
         title="Rapid-turnover summary per account",
         note=(
-            "Unbounded two-hop join grouped on scalar muleId (~1-2s). 24h window "
+            "Unbounded two-hop join grouped on scalar muleId (~1-2s on Databricks, "
+            "~2.5s on S3 Tables). 24h window "
             "dropped to match the doc. Average turnaround is computed over all "
             "forward-after-receive pairs as transferEpochSeconds differences, "
             "which push down, and converted to hours client-side. rapidPairs>=50 "
@@ -557,7 +559,9 @@ LIMIT 25
             "Depth escalation: LIMIT 25 bounds the output, not the join work behind "
             "it. Exactly 25 paths come back (1 to 2s). No ORDER BY, so they are an "
             "arbitrary 25: a sort makes the warehouse build every four-hop chain "
-            "before the limit applies. An anchor is what makes a deep traversal cheap."
+            "before the limit applies. An anchor is what makes a deep traversal cheap. "
+            "On S3 Tables this query drops the Bolt connection, a known issue reported "
+            "to the Virtual Graph product team."
         ),
         cypher="""
 MATCH p=(a:Account)-[:TRANSFERRED_TO]->(b:Account)-[:TRANSFERRED_TO]->(c:Account)
